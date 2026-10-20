@@ -256,14 +256,18 @@ class Runner:
         """Fold one round into the in-memory aggregate used by /session/live."""
         with self._lock:
             for row in batch:
-                acc = self._acc.setdefault(row["target_id"],
-                                           {"sent": 0, "vals": [], "spark": []})
+                acc = self._acc.setdefault(
+                    row["target_id"],
+                    {"sent": 0, "vals": [], "spark": [], "spark_ts": []})
                 acc["sent"] += 1
                 if row["ok"] and row["ms"] is not None:
                     acc["vals"].append(row["ms"])
                     acc["spark"].append(row["ms"])
+                    # 同时留存时间戳，悬停提示才能说清「哪一刻的读数」
+                    acc.setdefault("spark_ts", []).append(row.get("ts", ""))
                     if len(acc["spark"]) > 60:
                         del acc["spark"][:-60]
+                        del acc["spark_ts"][:-60]
 
     def live_stats(self) -> list[dict]:
         """Per-target live stats from the in-memory aggregate (no DB scan)."""
@@ -277,6 +281,7 @@ class Runner:
                                target=t["name"], host=t["host"], proto=t["proto"])
                 d = st.as_dict()
                 d["spark"] = [round(v, 1) for v in acc["spark"]]
+                d["spark_ts"] = list(acc.get("spark_ts") or [])
                 d["group"] = t.get("group", "")
                 out.append(d)
         return out

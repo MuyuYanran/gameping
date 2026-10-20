@@ -96,9 +96,11 @@ def summarize(values: Iterable[float], sent: int, *, target_id: int = 0, target:
 
 def bucketize(points: Sequence[tuple[datetime, float | None]], buckets: int = 60
               ) -> list[dict]:
-    """Split a time series into equal-width buckets for sparkline/chart rendering.
+    """Split a time series into equal-width buckets for chart rendering.
 
-    Each point is (timestamp, rtt or None-for-loss).
+    Each point is (timestamp, rtt or None-for-loss). Every bucket also carries the
+    raw samples that fell into it (`samples`), so the UI can show the individual
+    readings on hover instead of only the bucket average.
     """
     if not points:
         return []
@@ -108,15 +110,21 @@ def bucketize(points: Sequence[tuple[datetime, float | None]], buckets: int = 60
         buckets = 1
     if span <= 0:
         vals = [p[1] for p in points if p[1] is not None]
-        return [{"t": start.isoformat(timespec="seconds"),
+        return [{"t": start.timestamp(),
                  "avg": r1(mean(vals)) if vals else None,
-                 "loss": r1(100.0 if not vals else 0.0)}]
+                 "loss": r1(100.0 if not vals else 0.0),
+                 "samples": [{"t": p[0].isoformat(timespec="seconds"),
+                              "ms": None if p[1] is None else r1(p[1])}
+                             for p in points]}]
     width = span / buckets
     acc: list[list[float]] = [[] for _ in range(buckets)]
     lost = [0] * buckets
+    raw: list[list[dict]] = [[] for _ in range(buckets)]
     for ts, rtt in points:
         idx = int((ts - start).total_seconds() / width)
         idx = max(0, min(buckets - 1, idx))
+        raw[idx].append({"t": ts.isoformat(timespec="seconds"),
+                         "ms": None if rtt is None else r1(rtt)})
         if rtt is None:
             lost[idx] += 1
         else:
@@ -129,6 +137,8 @@ def bucketize(points: Sequence[tuple[datetime, float | None]], buckets: int = 60
             "t": (start.timestamp() + width * i),
             "avg": r1(mean(vals)) if vals else None,
             "loss": r1(lost[i] * 100.0 / total) if total else 0.0,
+            # 悬停提示要显示「那一次」的真实读数，而不是这个桶的均值
+            "samples": raw[i],
         })
     return out
 

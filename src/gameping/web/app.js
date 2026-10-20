@@ -75,16 +75,24 @@ function fmtDur(sec) {
 function gradeClass(g) { return `g-${GRADE_ORDER.includes(g) ? g : 'X'}`; }
 function badge(g) { return `<span class="badge ${GRADE_ORDER.includes(g) ? g : 'X'}">${g || 'X'}</span>`; }
 
-function sparkline(values, color = '#35d0ba', w = 240, h = 34) {
+function sparkline(values, color = '#35d0ba', w = 240, h = 34, stamps = null) {
   if (!values || values.length < 2) {
     return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"></svg>`;
   }
   const max = Math.max(...values), min = Math.min(...values);
   const span = max - min || 1;
   const step = w / (values.length - 1);
-  const pts = values.map((v, i) => `${(i * step).toFixed(1)},${(h - 3 - (v - min) / span * (h - 6)).toFixed(1)}`);
+  const cy = v => h - 3 - (v - min) / span * (h - 6);
+  const pts = values.map((v, i) => `${(i * step).toFixed(1)},${cy(v).toFixed(1)}`);
+  // 每个点挂原生 <title>：鼠标悬停即显示那一次的读数与时刻
+  const dots = values.map((v, i) => {
+    const when = stamps && stamps[i] ? ` @ ${fmtTime(stamps[i])}` : '';
+    return `<circle cx="${(i * step).toFixed(1)}" cy="${cy(v).toFixed(1)}" r="2.2"
+      fill="${color}" opacity="0"><title>第 ${i + 1} 次：${Number(v).toFixed(1)} ms${when}</title></circle>`;
+  }).join('');
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
     <polyline fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" points="${pts.join(' ')}"/>
+    ${dots}
   </svg>`;
 }
 
@@ -253,7 +261,7 @@ function renderLive(d) {
         <span>抖动 ${fmtMs(s.jitter)}</span>
         <span>丢 ${fmtPct(s.loss)}</span>
       </div>
-      ${sparkline(s.spark, color)}
+      ${sparkline(s.spark, color, 240, 34, s.spark_ts)}
     </div>`;
   }).join('');
 }
@@ -457,6 +465,8 @@ function refreshTrendFromChart() { renderTrend(); }
 function drawChart() {
   const svg = $('#chartSvg');
   const series = visibleSeries();
+  const tip = $('#chartTip');
+  if (tip) { tip.hidden = true; tip.innerHTML = ''; }
   if (!series.length) {
     svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle">没有可绘制的数据</text>`;
     $('#chartLegend').innerHTML = '';
@@ -517,10 +527,128 @@ function drawChart() {
     ${paths}
     <text x="${PAD.l}" y="${H - 8}">${label(first)}</text>
     <text x="${W - PAD.r}" y="${H - 8}" text-anchor="end">${label(last)}</text>
-    <text x="${PAD.l - 34}" y="${PAD.t + 4}">ms</text>`;
+    <text x="${PAD.l - 34}" y="${PAD.t + 4}">ms</text>
+    <g id="hoverLayer" style="display:none">
+      <line class="hover-line" id="hoverLine" x1="0" y1="${PAD.t}" x2="0" y2="${H - PAD.b}"/>
+      <g id="hoverDots"></g>
+    </g>`;
   $('#chartLegend').innerHTML = series.map((s, i) =>
     `<span><i style="background:${COLORS[i % COLORS.length]}"></i>${s.target}</span>`).join('') +
     `<span><i style="background:#ef5a6f;height:5px;width:5px;border-radius:50%"></i>丢包点</span>`;
+
+  bindChartHover({ series, svg, x, y, n, W, H, PAD });
+}
+
+/* ---- 悬停读数：十字线 + 该时刻每条线的真实采样值 ---- */
+function bindChartHover(ctx) {
+  const { series, svg, x, y, n, H, PAD } = ctx;
+  const wrap = $('#chartWrap');
+  const tip = $('#chartTip');
+  const layer = svg.querySelector('#hoverLayer');
+  const line = svg.querySelector('#hoverLine');
+  const dots = svg.querySelector('#hoverDots');
+  if (!wrap || !tip || !layer || !line || !dots) return;
+
+  const nearestIndex = (clientX) => {
+    const rect = svg.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const vx = ratio * 1000;                 // 换回 viewBox 坐标
+    const i = Math.round((vx - PAD.l) / ((1000 - PAD.l - PAD.r) / Math.max(1, n - 1)));
+    return Math.min(n - 1, Math.max(0, i));
+  };
+
+  const pickSample = (points, i) => {
+    // 桶内有多条原始读数时，取离该时刻最近的那条
+    const bucket = points[i];
+    if (!bucket || !bucket.samples || !bucket.samples.length) {
+      return bucket && bucket.avg !== null ? { ms: bucket.avg, t: null } : { ms: null, t: null };
+    }
+    const want = series[0].points[i]?.t ?? 0;
+    let best = bucket.samples[0], bestD = Infinity;
+    for (const s of bucket.samples) {
+      const ts = s.t ? new Date(s.t).getTime() / 1000 : 0;
+      const d = Math.abs(ts - want);
+      if (d < bestD) { bestD = d; best = s; }
+    }
+    return best;
+  };
+
+  const show = (ev) => {
+    const i = nearestIndex(ev.clientX);
+    const cx = x(i);
+    layer.style.display = '';
+    line.setAttribute('x1', cx);
+    line.setAttribute('x2', cx);
+    dots.innerHTML = '';
+    const rows = [];
+    let stamp = null;
+
+    series.forEach((s, idx) => {
+      const color = COLORS[idx % COLORS.length];
+      const bucket = s.points[i];
+      const sample = pickSample(s.points, i);
+      if (!stamp) {
+        stamp = (sample && sample.t) || (bucket && bucket.t
+          ? new Date(bucket.t * 1000).toISOString() : null);
+      }
+      if (!bucket || (bucket.avg === null && !(bucket.samples || []).length)) return;
+      const ms = sample ? sample.ms : null;
+      if (ms !== null && ms !== undefined) {
+        dots.insertAdjacentHTML('beforeend',
+          `<circle class="hover-dot" cx="${cx.toFixed(1)}" cy="${y(ms).toFixed(1)}"
+             r="3.4" fill="${color}"/>`);
+      }
+      const loss = bucket.loss || 0;
+      const raw = (bucket.samples || []).length;
+      rows.push({
+        name: s.target, color, ms,
+        loss, raw,
+        avg: bucket.avg,                       // 同桶多次采样时用于补显均值
+      });
+    });
+
+    if (!rows.length) { tip.hidden = true; return; }
+    const timeText = stamp ? fmtTime(stamp) : '—';
+    const body = rows.map(r => {
+      const hasMs = r.ms !== null && r.ms !== undefined;
+      const val = hasMs
+        ? `${fmtMs(r.ms)}<span class="tip-sub">ms</span>`
+        : '<span class="tip-loss">超时</span>';
+      // 同桶多次采样时补一句均值，丢包也标出来
+      const notes = [];
+      if (r.raw > 1) notes.push(`${r.raw} 次均 ${fmtMs(r.avg)}`);
+      if (r.loss > 0 && hasMs) notes.push(`丢 ${fmtPct(r.loss)}`);
+      return `<div class="tip-row">
+          <span class="tip-name"><i style="background:${r.color}"></i>${r.name}</span>
+          <span class="tip-val">${val}</span>
+        </div>`
+        + (notes.length ? `<div class="tip-raw">${notes.join(' · ')}</div>` : '');
+    }).join('');
+    tip.innerHTML = `<div class="tip-time">${timeText}</div>${body}`;
+    tip.hidden = false;
+
+    // 定位：优先放在十字线右侧，放不下就翻到左侧；竖直方向置顶对齐，
+    // 这样提示框不会压住光标附近正在读的那段曲线。
+    const wrapRect = wrap.getBoundingClientRect();
+    const rect = svg.getBoundingClientRect();
+    const px = rect.left - wrapRect.left + (cx / 1000) * rect.width;
+    tip.style.left = '0px';
+    tip.style.top = '0px';
+    const tw = tip.offsetWidth;
+    let left = px + 18;
+    if (left + tw > wrapRect.width - 6) left = px - tw - 18;
+    tip.style.left = `${Math.max(6, left)}px`;
+    tip.style.top = '6px';
+  };
+
+  const hide = () => { layer.style.display = 'none'; tip.hidden = true; };
+
+  svg.addEventListener('mousemove', show);
+  svg.addEventListener('mouseleave', hide);
+  // 触屏：按住并滑动也能读数
+  svg.addEventListener('touchstart', (e) => { if (e.touches[0]) show(e.touches[0]); }, { passive: true });
+  svg.addEventListener('touchmove', (e) => { if (e.touches[0]) show(e.touches[0]); }, { passive: true });
+  svg.addEventListener('touchend', hide);
 }
 
 const TREND_LABEL = { up: ['↗ 变慢', 'g-C'], down: ['↘ 变快', 'g-A'], flat: ['→ 平稳', ''] };

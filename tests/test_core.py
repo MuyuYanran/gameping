@@ -80,6 +80,34 @@ def test_bucketize_and_trend():
     assert tr["delta"] is not None
 
 
+def test_bucketize_keeps_raw_samples():
+    """悬停要显示「那一次」的读数，桶里必须带原始采样。"""
+    base = datetime.now()
+    pts = [(base + timedelta(seconds=i), 40.0 + i) for i in range(6)]
+    pts[2] = (pts[2][0], None)                       # 一次超时
+    buckets = S.bucketize(pts, buckets=3)
+    flat = [s for b in buckets for s in b["samples"]]
+    assert len(flat) == 6                             # 一条不丢，包括超时点
+    assert sum(1 for s in flat if s["ms"] is None) == 1
+    assert all("t" in s for s in flat)
+    assert buckets[0]["avg"] == 40.5                  # 均值只算成功样本
+
+
+def test_bucketize_single_point_has_sample():
+    base = datetime.now()
+    out = S.bucketize([(base, 55.5)], buckets=5)
+    assert len(out) == 1
+    assert out[0]["samples"] == [{"t": base.isoformat(timespec="seconds"), "ms": 55.5}]
+
+
+def test_bucketize_sparse_buckets_are_empty():
+    base = datetime.now()
+    pts = [(base, 10.0), (base + timedelta(seconds=100), 20.0)]
+    out = S.bucketize(pts, buckets=10)
+    assert len([b for b in out if b["samples"]]) == 2
+    assert all(b["avg"] is None for b in out if not b["samples"])
+
+
 def test_spikes_detects_outlier():
     base = datetime.now()
     pts = [(base + timedelta(seconds=i), 20.0) for i in range(30)]

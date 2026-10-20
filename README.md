@@ -13,7 +13,7 @@
 - **SQLite history** — every round is persisted. Sessions survive restarts and the dashboard reattaches to the last session automatically.
 - **Scheduled runs** — define "every day at HH:MM for N minutes"; a background scheduler starts the test automatically. Missed occurrences beyond a 30-minute grace window are *not* back-filled (a laptop waking at 09:00 must not fire six tests).
 - **Threshold alerts** — after each session, targets exceeding latency / loss / jitter thresholds produce a stored alert with an unread badge in the header.
-- **Analysis tools** — latency curves (single session or any time window, multi-target overlay), trend (first-third vs last-third), MAD-based spike detection, two-target head-to-head scoring, per-day cross-session trends, and a loss heatmap by hour or weekday.
+- **Analysis tools** — latency curves (single session or any time window, multi-target overlay), trend (first-third vs last-third), MAD-based spike detection, two-target head-to-head scoring, per-day cross-session trends, and a loss heatmap by hour or weekday. **Hover the curve** for a candlestick-style crosshair readout: the exact timestamp plus every target's individual reading at that moment (not just the bucket average).
 - **Link tagging / link comparison** — label a session with a free-text network note ("wired", "phone hotspot"); the analysis page can then compare two links target-by-target side by side.
 - **Self-contained HTML report** — one file, inline SVG, no external assets; safe to send to a friend.
 - **Import** — bring in external CSV/JSON samples; unknown targets are created automatically.

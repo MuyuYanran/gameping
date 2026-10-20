@@ -224,6 +224,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
             if not samples:
                 continue
             pts = [(_dt(s["ts"]), s["ms"] if s["ok"] else None) for s in samples]
+            # 桶数不超过样本数，避免大量空桶；每桶内含原始读数供悬停使用
+            nb = min(buckets, len(samples))
             row = info.get(tid, {})
             result.append({
                 "target_id": tid,
@@ -231,7 +233,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 "host": row.get("host", ""),
                 "proto": row.get("proto", "tcp"),
                 "group": row.get("grp", ""),
-                "points": bucketize(pts, buckets),
+                "points": bucketize(pts, nb),
                 "trend": trend(pts),
                 "spikes": spikes(pts),
                 "raw_count": len(samples),

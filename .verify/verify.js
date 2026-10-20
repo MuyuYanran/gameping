@@ -56,6 +56,26 @@ fs.mkdirSync(OUT, { recursive: true });
     };
   });
 
+  // 曲线悬停读数（十字线 + 那一刻的真实数值）
+  const svgBox = await page.locator('#chartSvg').boundingBox();
+  await page.mouse.move(svgBox.x + svgBox.width * 0.5, svgBox.y + svgBox.height * 0.5);
+  await page.waitForTimeout(500);
+  const hoverInfo = await page.evaluate(() => {
+    const tip = document.querySelector('#chartTip');
+    const layer = document.querySelector('#hoverLayer');
+    return {
+      tipHidden: tip.hidden,
+      crosshair: layer ? layer.style.display !== 'none' : null,
+      lines: tip.hidden ? 0 : tip.innerText.split('\n').length,
+      hasTime: /^\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/.test((tip.innerText || '').split('\n')[0] || ''),
+    };
+  });
+  await page.screenshot({ path: OUT + '/hover.png',
+    clip: { x: 0, y: 60, width: 1500, height: 420 } });
+  await page.mouse.move(svgBox.x + svgBox.width * 0.5, svgBox.y - 80);
+  await page.waitForTimeout(300);
+  const hoverHides = await page.evaluate(() => document.querySelector('#chartTip').hidden);
+
   // 热力图
   await page.click('#btnHeat');
   await page.waitForTimeout(1800);
@@ -113,7 +133,8 @@ fs.mkdirSync(OUT, { recursive: true });
 
   console.log(JSON.stringify({
     errors, liveCount, heatCells, trendRows, schedRows,
-    sessionId, reportStatus, chartInfo, noteInfo, noteCompare,
+    sessionId, reportStatus, chartInfo, hoverInfo, hoverHides,
+    noteInfo, noteCompare,
   }, null, 2));
 
   await browser.close();
