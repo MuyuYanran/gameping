@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Runtime data (SQLite, config, logs, screenshots)
+data/*
+!data/.gitkeep
+
+# Tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# UI verification harness (local only: node_modules, screenshots)
+.verify/node_modules/
+.verify/shots/
+.verify/package-lock.json
+
+# Local bookkeeping
+.trash/

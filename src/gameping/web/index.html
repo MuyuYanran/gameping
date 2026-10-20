@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GamePing · 游戏平台网络质量监控</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand"><span class="dot"></span>GamePing <small>游戏平台延迟监控</small></div>
+  <nav id="nav">
+    <button data-view="live" class="on">实时测试</button>
+    <button data-view="history">历史记录</button>
+    <button data-view="analysis">分析工具</button>
+    <button data-view="schedules">定时与告警</button>
+    <button data-view="targets">目标管理</button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="pill" id="statusPill"><span class="dot"></span><span id="statusText">空闲</span></div>
+  <div class="pill" id="alertPill" title="未读告警" style="cursor:pointer">⚠ <b id="alertCount">0</b></div>
+  <div class="pill" id="dbPill">样本 <b id="dbSamples">-</b></div>
+</header>
+
+<main>
+
+<!-- ==================== 实时测试 ==================== -->
+<section class="view on" id="view-live">
+  <div class="grid k2" style="grid-template-columns:minmax(320px,1fr) minmax(320px,1.35fr); margin-bottom:14px">
+    <div class="card">
+      <h3>测试参数</h3>
+      <div class="row" style="margin-bottom:12px">
+        <div class="field">
+          <label>时长</label>
+          <div class="row" style="gap:6px">
+            <input type="number" id="inMin" value="5" min="0" max="1440" style="width:74px">
+            <span style="color:var(--dim);font-size:12px;align-self:center">分钟</span>
+            <input type="number" id="inSec" value="0" min="0" max="59" style="width:66px">
+            <span style="color:var(--dim);font-size:12px;align-self:center">秒</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>间隔 (秒)</label>
+          <input type="number" id="inInterval" value="5" min="0" max="600" step="0.5">
+        </div>
+        <div class="field">
+          <label>超时 (秒)</label>
+          <input type="number" id="inTimeout" value="1" min="0.1" max="30" step="0.1">
+        </div>
+      </div>
+      <div class="chips" style="margin-bottom:10px">
+        <span class="chip" data-preset="60">1 分钟</span>
+        <span class="chip on" data-preset="300">5 分钟</span>
+        <span class="chip" data-preset="900">15 分钟</span>
+        <span class="chip" data-preset="1800">30 分钟</span>
+        <span class="chip" data-preset="3600">1 小时</span>
+      </div>
+      <div id="liveTargetPick" style="margin-bottom:12px"></div>
+      <div class="field" style="margin-bottom:12px">
+        <label>本次网络备注（便于日后对比，例如「手机热点」「有线」）</label>
+        <input type="text" id="inNote" placeholder="留空则不标注" maxlength="64">
+      </div>
+      <div class="row">
+        <button class="btn primary" id="btnStart">▶ 开始测试</button>
+        <button class="btn danger" id="btnStop" disabled>■ 停止</button>
+        <span class="hint" id="liveHint">未选择目标时测试全部启用目标</span>
+      </div>
+      <div class="sep"></div>
+      <div class="progress-line">
+        <div class="bar" style="flex:1"><i id="liveBar" style="width:0%"></i></div>
+        <span id="liveProgress" class="mono">00:00 / 00:00</span>
+      </div>
+      <div class="hint" style="margin-top:8px" id="liveMeta">—</div>
+    </div>
+
+    <div class="card">
+      <h3>实时概览 <span class="tag" id="liveRoundTag">—</span></h3>
+      <div class="grid k4" style="margin-bottom:6px">
+        <div class="kpi"><span class="v" id="kpiBest">—</span><span class="l">最低平均延迟</span></div>
+        <div class="kpi"><span class="v" id="kpiWorst">—</span><span class="l">最高平均延迟</span></div>
+        <div class="kpi"><span class="v" id="kpiLoss">—</span><span class="l">总丢包率</span></div>
+        <div class="kpi"><span class="v" id="kpiJitter">—</span><span class="l">平均抖动</span></div>
+      </div>
+      <div class="sep"></div>
+      <div class="hint">绿色=优秀(S) 黄=可玩(B) 橙/红=差(C/X)。丢包>0 或抖动>50ms 自动降级。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>目标实时延迟</h3>
+    <div class="tgrid" id="liveGrid"><div class="empty">点击「开始测试」后，这里会实时显示各平台延迟</div></div>
+  </div>
+</section>
+
+<!-- ==================== 历史记录 ==================== -->
+<section class="view" id="view-history">
+  <div class="card" style="margin-bottom:14px">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">历史测试会话</h3>
+      <div class="row">
+        <button class="btn sm ghost" id="btnRefreshSessions">刷新</button>
+        <button class="btn sm ghost" id="btnPurge">清理旧数据</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div class="scroll" style="max-height:320px">
+      <table>
+        <thead><tr>
+          <th>#</th><th style="text-align:left">开始时间</th><th>时长</th><th>间隔</th>
+          <th>目标</th><th>轮次</th><th>状态</th><th>操作</th>
+        </tr></thead>
+        <tbody id="sessionRows"><tr><td colspan="8" class="hint">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between; margin-bottom:10px">
+      <h3 style="margin:0" id="detailTitle">会话详情</h3>
+      <div class="row" id="detailActions" style="display:none">
+        <button class="btn sm ghost" id="btnExportCsv">导出 CSV</button>
+        <button class="btn sm ghost" id="btnExportJson">导出 JSON</button>
+        <button class="btn sm primary" id="btnExportHtml">HTML 报告</button>
+        <button class="btn sm ghost" id="btnLoadChart">查看曲线</button>
+      </div>
+    </div>
+    <div id="sessionDetail"><div class="empty">选择上方任一会话查看汇总</div></div>
+  </div>
+</section>
+
+<!-- ==================== 分析工具 ==================== -->
+<section class="view" id="view-analysis">
+  <div class="card" style="margin-bottom:14px">
+    <div class="row" style="justify-content:space-between; align-items:flex-end">
+      <h3 style="margin:0">延迟曲线</h3>
+      <div class="row" style="align-items:flex-end">
+        <div class="field"><label>数据源</label>
+          <select id="anMode">
+            <option value="session">单次会话</option>
+            <option value="window">任意时间范围</option>
+          </select>
+        </div>
+        <div class="field" id="anSessionWrap"><label>会话</label><select id="anSession"></select></div>
+        <div class="field" id="anWindowWrap" style="display:none"><label>时间范围</label>
+          <select id="anWindow">
+            <option value="1">最近 1 小时</option>
+            <option value="6">最近 6 小时</option>
+            <option value="24" selected>最近 24 小时</option>
+            <option value="168">最近 7 天</option>
+            <option value="720">最近 30 天</option>
+          </select>
+        </div>
+        <button class="btn sm" id="btnAnalyze">生成分析</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div id="anTargetChips" class="chips" style="margin-bottom:10px"></div>
+    <div class="chart-wrap"><svg class="chart" id="chartSvg"></svg></div>
+    <div class="legend" id="chartLegend"></div>
+  </div>
+
+  <div class="grid k2">
+    <div class="card">
+      <h3>趋势与稳定性</h3>
+      <div class="scroll" style="max-height:340px">
+        <table>
+          <thead><tr><th style="text-align:left">目标</th><th>平均</th><th>P95</th><th>抖动</th><th>丢包</th><th>趋势</th><th>评级</th></tr></thead>
+          <tbody id="trendRows"><tr><td colspan="7" class="hint">选择会话后生成</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <h3>异常抖动点 <span class="tag">中位数 + 2.5×MAD</span></h3>
+      <div class="scroll" style="max-height:340px">
+        <table>
+          <thead><tr><th style="text-align:left">目标</th><th style="text-align:left">时间</th><th>延迟</th><th>偏离</th></tr></thead>
+          <tbody id="spikeRows"><tr><td colspan="4" class="hint">选择会话后生成</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">丢包热力图</h3>
+      <div class="row">
+        <div class="field"><label>统计维度</label>
+          <select id="heatBucket"><option value="hour">按小时</option><option value="dow">按星期</option></select>
+        </div>
+        <div class="field"><label>回看</label>
+          <select id="heatDays"><option value="7">7 天</option><option value="14" selected>14 天</option><option value="30">30 天</option></select>
+        </div>
+        <button class="btn sm" id="btnHeat">刷新热力图</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div id="heatmap"><div class="empty">点击「刷新热力图」按目标×时段查看丢包分布</div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">跨会话趋势 <span class="tag">按天</span></h3>
+      <div class="row">
+        <div class="field"><label>回看</label>
+          <select id="trendDays"><option value="7">7 天</option><option value="30" selected>30 天</option><option value="90">90 天</option></select>
+        </div>
+        <button class="btn sm" id="btnTrend">分析</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div class="scroll" style="max-height:360px">
+      <table>
+        <thead><tr><th style="text-align:left">目标</th><th>有数据天数</th><th>总平均</th><th>变化</th><th>幅度</th><th>方向</th></tr></thead>
+        <tbody id="longTrendRows"><tr><td colspan="6" class="hint">点击「分析」查看这周是否比上周差</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">链路对比 <span class="tag">按网络备注</span></h3>
+      <div class="row">
+        <div class="field"><label>链路 A</label><select id="noteA"></select></div>
+        <div class="field"><label>链路 B</label><select id="noteB"></select></div>
+        <button class="btn sm" id="btnNoteCompare">对比</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div id="noteCompare">
+      <div class="empty">在「实时测试」里给会话填备注（如「手机热点」「有线」），这里就能对比两条链路在各平台上的差距</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3>两两对比</h3>
+    <div class="row" style="margin-bottom:12px">
+      <div class="field"><label>目标 A</label><select id="cmpA"></select></div>
+      <div class="field"><label>目标 B</label><select id="cmpB"></select></div>
+      <button class="btn sm" id="btnCompare">对比</button>
+    </div>
+    <div id="cmpResult"><div class="empty">选择同一次会话中的两个目标进行评分对比</div></div>
+  </div>
+</section>
+
+<!-- ==================== 定时任务 ==================== -->
+<section class="view" id="view-schedules">
+  <div class="card" style="margin-bottom:14px">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">每日定时测试</h3>
+      <div class="row">
+        <span class="pill" id="schedState"><span class="dot"></span><span>调度器</span></span>
+        <button class="btn sm primary" id="btnAddSched">+ 新建计划</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div class="scroll" style="max-height:320px">
+      <table>
+        <thead><tr>
+          <th>#</th><th style="text-align:left">名称</th><th>每天时刻</th><th>时长</th>
+          <th>间隔</th><th>目标</th><th>上次运行</th><th>启用</th><th>操作</th>
+        </tr></thead>
+        <tbody id="schedRows"><tr><td colspan="9" class="hint">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="hint" style="margin-top:10px" id="schedHint">
+      计划到点后自动开测，错过超过 30 分钟不再补跑（避免开机时连跑多次）。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">告警记录 <span class="tag" id="alertBadge">0 未读</span></h3>
+      <div class="row">
+        <button class="btn sm ghost" id="btnAlertSeen">全部标记已读</button>
+        <button class="btn sm ghost" id="btnAlertRefresh">刷新</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div class="hint" id="alertThresholds" style="margin-bottom:8px"></div>
+    <div class="scroll" style="max-height:300px">
+      <table>
+        <thead><tr><th style="text-align:left">时间</th><th style="text-align:left">目标</th>
+          <th>类型</th><th>实测</th><th>阈值</th><th style="text-align:left">说明</th></tr></thead>
+        <tbody id="alertRows"><tr><td colspan="6" class="hint">暂无告警</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3>导入外部测试数据</h3>
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn sm ghost" id="btnImportFile">选择 CSV 文件…</button>
+      <input type="file" id="importFile" accept=".csv,text/csv" style="display:none">
+      <span class="hint">CSV 列：timestamp, target, ok, ms（可含 ip）；导入会创建成一个新会话</span>
+    </div>
+    <div id="importResult" class="hint"></div>
+  </div>
+</section>
+
+<!-- ==================== 目标管理 ==================== -->
+<section class="view" id="view-targets">
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">测试目标</h3>
+      <div class="row">
+        <button class="btn sm ghost" id="btnProbeAll">全部测一次</button>
+        <button class="btn sm primary" id="btnAddTarget">+ 添加目标</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div class="scroll" style="max-height:520px">
+      <table>
+        <thead><tr>
+          <th>#</th><th style="text-align:left">名称</th><th style="text-align:left">主机</th>
+          <th>端口</th><th>协议</th><th style="text-align:left">分组</th><th>解析 IP</th>
+          <th>启用</th><th>操作</th>
+        </tr></thead>
+        <tbody id="targetRows"><tr><td colspan="9" class="hint">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="hint" style="margin-top:10px">探测方式：TCP 握手=应用层 RTT（推荐，不受禁 ping 影响）；ICMP=系统 ping；HTTP TTFB=HEAD 首字节；DNS=解析耗时。</div>
+  </div>
+</section>
+
+</main>
+
+<dialog id="dlgTarget">
+  <h3>添加测试目标</h3>
+  <form method="dialog" id="formTarget">
+    <div class="field"><label>名称</label><input type="text" id="fName" placeholder="例如 完美世界·竞技" required></div>
+    <div class="field"><label>主机 / IP</label><input type="text" id="fHost" placeholder="pvp.wanmei.com" required></div>
+    <div class="row" style="gap:10px">
+      <div class="field" style="flex:1"><label>端口</label><input type="number" id="fPort" value="443" min="1" max="65535"></div>
+      <div class="field" style="flex:1"><label>探测方式</label>
+        <select id="fProto">
+          <option value="tcp">TCP 握手（推荐）</option>
+          <option value="icmp">ICMP Ping</option>
+          <option value="http">HTTP TTFB</option>
+          <option value="dns">DNS 解析耗时</option>
+        </select>
+      </div>
+    </div>
+    <div class="field"><label>分组</label><input type="text" id="fGroup" placeholder="CS2 平台 / FPS 平台 …"></div>
+    <menu>
+      <button class="btn ghost" value="cancel" formnovalidate>取消</button>
+      <button class="btn primary" value="ok" id="fSubmit">添加</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="dlgSched">
+  <h3>新建定时测试计划</h3>
+  <form method="dialog" id="formSched">
+    <div class="field"><label>名称</label><input type="text" id="sName" placeholder="例如 每日下班前" required></div>
+    <div class="row" style="gap:10px">
+      <div class="field" style="flex:1"><label>每天时刻</label><input type="text" id="sTime" value="08:30" placeholder="HH:MM" required></div>
+      <div class="field" style="flex:1"><label>时长（分钟）</label><input type="number" id="sMinutes" value="5" min="1" max="1440"></div>
+    </div>
+    <div class="row" style="gap:10px">
+      <div class="field" style="flex:1"><label>间隔（秒）</label><input type="number" id="sInterval" value="5" min="1" max="600" step="0.5"></div>
+      <div class="field" style="flex:1"><label>超时（秒）</label><input type="number" id="sTimeout" value="1" min="0.1" max="30" step="0.1"></div>
+    </div>
+    <div class="field"><label>目标（不选=全部启用目标）</label><div id="sTargets" class="chips" style="max-height:150px;overflow:auto"></div></div>
+    <menu>
+      <button class="btn ghost" value="cancel" formnovalidate>取消</button>
+      <button class="btn primary" value="ok" id="sSubmit">创建</button>
+    </menu>
+  </form>
+</dialog>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
