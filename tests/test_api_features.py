@@ -133,6 +133,114 @@ def test_notes_compare_unknown(client):
     assert client.get("/api/analytics/notes/compare?a=x&b=y").status_code == 404
 
 
+# ------------------------- stutter / bursts -------------------------
+def test_stutter_endpoint(client):
+    sid = _import(client, bad=2).json()["session_id"]
+    r = client.get(f"/api/sessions/{sid}/stutter")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["items"]
+    item = body["items"][0]
+    assert "score" in item["stutter"] and 0 <= item["stutter"]["score"] <= 100
+    assert isinstance(item["bursts"], list)
+    assert body["worst"]
+
+
+def test_stutter_missing_session(client):
+    assert client.get("/api/sessions/99999/stutter").status_code == 404
+
+
+def test_series_includes_stutter_and_bursts(client):
+    sid = _import(client, bad=2).json()["session_id"]
+    series = client.get(f"/api/sessions/{sid}/series").json()["series"]
+    assert series
+    first = series[0]
+    assert "stutter" in first and "bursts" in first
+    assert first["bursts"], "两次连续超时应被识别为一次突发"
+
+
+# ------------------------- baseline -------------------------
+def test_target_baseline_roundtrip(client):
+    tid = client.get("/api/targets").json()["items"][0]["id"]
+    r = client.patch(f"/api/targets/{tid}", json={"baseline": 45})
+    assert r.status_code == 200 and r.json()["baseline"] == 45
+    # 设了基线后，series 里应带上对比结果
+    sid = _import(client).json()["session_id"]
+    series = client.get(f"/api/sessions/{sid}/series").json()["series"]
+    assert series, "导入的会话应有数据"
+
+
+def test_target_baseline_clear(client):
+    tid = client.get("/api/targets").json()["items"][0]["id"]
+    client.patch(f"/api/targets/{tid}", json={"baseline": 40})
+    r = client.patch(f"/api/targets/{tid}", json={"baseline": None})
+    assert r.json()["baseline"] is None
+
+
+# ------------------------- dns -------------------------
+def test_dns_check_requires_host(client):
+    assert client.get("/api/dns/check").status_code == 400
+
+
+def test_dns_check_unknown_target(client):
+    assert client.get("/api/dns/check?target_id=99999").status_code == 404
+
+
+def test_dns_check_literal_ip(client):
+    r = client.get("/api/dns/check?host=223.5.5.5").json()
+    assert r["v4"] == ["223.5.5.5"] and r["suspicious"] is False
+
+
+def test_dns_all_lists_targets(client):
+    r = client.get("/api/dns/all").json()
+    assert r["count"] >= 8
+    assert all("v4" in item and "suspicious" in item for item in r["items"])
+
+
+# ------------------------- instances -------------------------
+def test_instance_lifecycle(client):
+    r = client.post("/api/instances", json={"id": "desk", "label": "台式"})
+    assert r.status_code == 201, r.text
+    assert r.json()["id"] == "desk"
+    assert any(i["id"] == "desk" for i in client.get("/api/instances").json()["items"])
+    assert client.delete("/api/instances/desk").status_code == 200
+    assert client.delete("/api/instances/desk").status_code == 404
+
+
+def test_instance_import_records_source(client):
+    r = client.post("/api/sessions/import", json={
+        "instance": "laptop", "label": "笔记本",
+        "samples": [{"ts": "2026-10-20T10:00:00", "target": "A", "ok": 1, "ms": 50.0}]})
+    assert r.status_code == 200
+    inst = {i["id"]: i for i in client.get("/api/instances").json()["items"]}
+    assert "laptop" in inst and inst["laptop"]["samples"] >= 1
+
+
+# ------------------------- svg export + pwa -------------------------
+def test_chart_svg_endpoint(client):
+    sid = _import(client).json()["session_id"]
+    r = client.get(f"/api/sessions/{sid}/chart.svg")
+    assert r.status_code == 200
+    assert "image/svg+xml" in r.headers["content-type"]
+    assert r.text.startswith("<svg")
+    dl = client.get(f"/api/sessions/{sid}/chart.svg?download=1")
+    assert dl.headers.get("content-disposition", "").startswith("attachment")
+
+
+def test_chart_svg_missing_session(client):
+    assert client.get("/api/sessions/9999/chart.svg").status_code == 404
+
+
+def test_pwa_assets_served(client):
+    assert client.get("/manifest.webmanifest").status_code == 200
+    assert client.get("/sw.js").status_code == 200
+    assert client.get("/static/icon-192.png").status_code == 200
+    assert client.get("/static/icon-512.png").status_code == 200
+    man = client.get("/manifest.webmanifest").json()
+    assert man["display"] == "standalone"
+    assert len(man["icons"]) == 2
+
+
 def test_trends_note_filter(client):
     _import(client)
     r = client.get("/api/analytics/trends?days=3650&note=csv-import")

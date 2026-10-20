@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from gameping import alerts as A            # noqa: E402
 from gameping import probe as P             # noqa: E402
+from gameping import stats as S             # noqa: E402
 from gameping.db import Database            # noqa: E402
 from gameping.report import build_report    # noqa: E402
 from gameping.scheduler import due_now, parse_hhmm  # noqa: E402
@@ -255,6 +256,158 @@ def test_daily_trend_filters_by_note(db):
 def test_notes_ignore_empty(db):
     db.import_samples([{"ts": "2026-10-20T08:00:00", "target": "A", "ok": 1, "ms": 40.0}])
     assert db.list_notes() == []             # 未填备注的会话不进列表
+
+
+# ------------------------- stutter / bursts / baseline -------------------------
+def test_loss_bursts_detects_consecutive_failures():
+    base = datetime.now()
+    pts = []
+    for i in range(20):
+        # 第 5、6 次丢包 → 一次突发；第 15 次单丢不算突发
+        lost = i in (5, 6, 15)
+        pts.append((base + timedelta(seconds=i), None if lost else 45.0))
+    bursts = S.loss_bursts(pts)
+    assert len(bursts) == 1
+    assert bursts[0]["count"] == 2
+
+
+def test_loss_bursts_empty_when_clean():
+    base = datetime.now()
+    pts = [(base + timedelta(seconds=i), 40.0) for i in range(10)]
+    assert S.loss_bursts(pts) == []
+
+
+def test_loss_bursts_splits_by_gap():
+    base = datetime.now()
+    pts = [(base, None), (base + timedelta(seconds=1), None),
+           (base + timedelta(seconds=500), None),
+           (base + timedelta(seconds=501), None)]
+    # 两组相隔 500s，应视为两次独立突发
+    assert len(S.loss_bursts(pts)) == 2
+
+
+def test_stutter_rewards_smoothness_over_raw_speed():
+    base = datetime.now()
+    steady = [(base + timedelta(seconds=i), 70.0) for i in range(40)]
+    spiky = [(base + timedelta(seconds=i),
+              None if i % 10 in (8, 9) else 30.0) for i in range(40)]
+    s_steady = S.stutter_score(steady)
+    s_spiky = S.stutter_score(spiky)
+    # 30ms 但老连丢的链路，体感分应低于稳定 70ms
+    assert s_steady["score"] > s_spiky["score"]
+    assert s_spiky["worst_burst"] == 2
+    assert "超时" in s_spiky["reason"] or "丢包" in s_spiky["reason"]
+
+
+def test_stutter_all_failed():
+    base = datetime.now()
+    pts = [(base + timedelta(seconds=i), None) for i in range(5)]
+    s = S.stutter_score(pts)
+    assert s["score"] == 0.0 and s["label"] == "不可用"
+
+
+def test_stutter_labels_are_ordered():
+    base = datetime.now()
+    good = S.stutter_score([(base + timedelta(seconds=i), 25.0) for i in range(20)])
+    assert good["label"] == "顺滑"
+    assert good["score"] > 90
+
+
+def test_baseline_delta_levels():
+    st = S.summarize([50.0] * 10, 10, target="x")
+    assert S.baseline_delta(st, None) is None
+    assert S.baseline_delta(st, 0) is None
+    assert S.baseline_delta(st, 50.0)["level"] == "ok"        # 持平
+    assert S.baseline_delta(st, 42.0)["level"] == "ok"        # +19%，未到 20% 警戒线
+    assert S.baseline_delta(st, 40.0)["level"] == "warn"      # +25%
+    assert S.baseline_delta(st, 30.0)["level"] == "bad"       # +67%
+    assert S.baseline_delta(st, 80.0)["level"] == "good"      # -37%
+
+
+# ------------------------- dns / ipv6 -------------------------
+def test_resolve_all_reports_families():
+    info = P.resolve_all("localhost")
+    assert "127.0.0.1" in info["v4"]
+    assert info["suspicious"] is True          # 回环地址对公网域名属异常
+
+
+def test_resolve_all_literal_ip():
+    info = P.resolve_all("223.5.5.5")
+    assert info["v4"] == ["223.5.5.5"] and info["ms"] == 0.0
+    assert info["suspicious"] is False
+
+
+def test_is_suspicious_address_ranges():
+    for bad in ("127.0.0.1", "10.1.2.3", "192.168.1.1", "172.16.0.1",
+                "169.254.1.1", "0.0.0.0", "::1", "fe80::1"):
+        assert P.is_suspicious_address(bad), bad
+    for ok in ("114.114.114.114", "223.5.5.5", "8.8.8.8"):
+        assert not P.is_suspicious_address(ok), ok
+
+
+# ------------------------- instances -------------------------
+def test_instance_upsert_and_counters(db):
+    a = db.touch_instance("desktop", label="台式·有线", sample_delta=5)
+    assert a["id"] == "desktop" and a["samples"] == 5
+    b = db.touch_instance("desktop", sample_delta=3)
+    assert b["samples"] == 8
+    assert b["label"] == "台式·有线"          # 空 label 不清空原值
+    ids = [i["id"] for i in db.list_instances()]
+    assert "desktop" in ids
+
+
+def test_instance_from_import(db):
+    r = db.import_samples(
+        [{"ts": "2026-10-20T10:00:00", "target": "A", "ok": 1, "ms": 40.0}],
+        instance="laptop", label="笔记本")
+    assert r["imported"] == 1
+    inst = {i["id"]: i for i in db.list_instances()}["laptop"]
+    assert inst["samples"] >= 1
+
+
+def test_instance_empty_id_rejected(db):
+    with pytest.raises(ValueError):
+        db.touch_instance("")
+
+
+def test_instance_delete(db):
+    db.touch_instance("tmp")
+    assert db.delete_instance("tmp") is True
+    assert db.delete_instance("tmp") is False
+
+
+# ------------------------- svg export -------------------------
+def test_svg_export_is_valid_xml(db):
+    import xml.dom.minidom as minidom
+    from gameping.export import build_svg
+
+    r = db.import_samples([
+        {"ts": "2026-10-20T09:00:00", "target": "A站", "ok": 1, "ms": 45.0},
+        {"ts": "2026-10-20T09:00:05", "target": "A站", "ok": 0, "ms": None},
+        {"ts": "2026-10-20T09:00:00", "target": "B站", "ok": 1, "ms": 120.0},
+    ])
+    svg = build_svg(db, r["session_id"])
+    assert svg.startswith("<svg")
+    minidom.parseString(svg)                  # 必须能被当 XML 解析
+    assert 'xmlns="http://www.w3.org/2000/svg"' in svg
+    assert "A站" in svg and "B站" in svg
+
+
+def test_svg_export_missing_session(db):
+    from gameping.export import build_svg
+    with pytest.raises(KeyError):
+        build_svg(db, 99999)
+
+
+def test_svg_export_escapes_title(db):
+    from gameping.export import build_svg
+    r = db.import_samples([
+        {"ts": "2026-10-20T09:00:00", "target": "A", "ok": 1, "ms": 30.0},
+        {"ts": "2026-10-20T09:00:01", "target": "A", "ok": 1, "ms": 31.0},
+    ])
+    svg = build_svg(db, r["session_id"], title="<script>alert(1)</script>")
+    assert "<script>alert" not in svg
+    assert "&lt;script&gt;" in svg
 
 
 # ------------------------- import -------------------------

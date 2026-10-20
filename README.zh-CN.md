@@ -15,7 +15,12 @@
 - **阈值告警** — 每次会话结束按延迟/丢包/抖动阈值判定，超标的落库并在顶部显示未读角标。
 - **分析工具** — 延迟曲线（单会话或任意时间窗，多目标叠加）、趋势（前 1/3 对比后 1/3）、基于 MAD 的异常抖动点、两目标综合评分对比、按天跨会话趋势、按小时/星期的丢包热力图。**鼠标悬停曲线**会出现十字游标，读出那一刻的精确时刻与每个目标的真实延迟（不是桶均值），像行情图一样。
 - **链路标注与对比** — 给会话填一条网络备注（如「有线」「手机热点」），分析页就能按两条链路逐目标并排对比。
-- **自包含 HTML 报告** — 单文件、内联 SVG、无任何外部资源，可以直接发给朋友。
+- **顺滑度评分与丢包突发** — 0–100 的体感分，权重偏向丢包与「连续超时」而非单纯平均延迟（稳定 80ms 优于 40ms 但每十次连丢两次的链路），并识别连续丢包突发。
+- **每目标基线** — 填该平台「正常时」的延迟，偏离 +20% / +50% 会在卡片和序列数据里标注。
+- **DNS 体检** — 解析所有目标，列出全部 A/AAAA 地址、解析耗时，并判断是否疑似劫持（公网域名却解析到回环/内网/链路本地地址）。
+- **多机汇总** — 导入数据时带上实例标识，多台机器可以汇到一份历史里，从而区分「我这条网的问题」还是「平台挂了」。
+- **自包含 HTML 报告 + 独立 SVG 图表** — 报告是单文件内联 SVG；另有一个只返回 SVG 的接口，可直接发群或转 PNG。
+- **可安装 PWA + 移动端布局** — 可加到主屏、离线缓存页面骨架、输入框 16px（iOS 不放大）、触控目标 ≥32px、390px 宽无横向滚动。
 - **导入** — 支持外部 CSV/JSON 样本，未匹配的目标会自动创建。
 - **导出** — 单会话 CSV（带 BOM，Excel 双击不乱码）与 JSON；支持按天数清理旧数据。
 - **前端零依赖零构建** — 一个 HTML、一个 CSS、一个 JS，和 FastAPI 同进程。
@@ -73,6 +78,13 @@ gameping report -s 12 -o out.html        # 导出自包含 HTML 报告
 | GET | `/api/sessions/{id}/compare?a=&b=` | 两目标对比 |
 | GET | `/api/sessions/{id}/export.csv\|json` | 下载 |
 | GET | `/api/sessions/{id}/report.html` | 自包含报告（`?download=1` 直接下载） |
+| GET | `/api/sessions/{id}/chart.svg` | 独立 SVG 图表（`?download=1` 直接下载） |
+| GET | `/api/sessions/{id}/stutter` | 各目标顺滑度评分与丢包突发 |
+| GET | `/api/dns/all` | 解析全部目标，标记劫持与 IPv6 |
+| GET | `/api/dns/check?host=` | 解析单个主机 |
+| GET/POST | `/api/instances` | 查看 / 登记上报实例 |
+| DELETE | `/api/instances/{id}` | 移除实例记录 |
+| PATCH | `/api/targets/{id}` | 额外接受 `baseline`（毫秒） |
 | DELETE | `/api/sessions/{id}` | 删除会话 |
 | POST | `/api/sessions/import` | 导入 JSON 样本 |
 | POST | `/api/sessions/import.csv` | 导入 CSV（原始 body，`text/csv`） |
@@ -108,10 +120,11 @@ gameping/
 │   ├── scheduler.py          # 每日 HH:MM 调度线程
 │   ├── alerts.py             # 阈值判定
 │   ├── report.py             # 自包含 HTML 报告
+│   ├── export.py             # 独立 SVG 图表导出
 │   ├── api.py                # FastAPI 路由 + 静态托管
 │   ├── cli.py                # serve / test / analyze / report
 │   └── web/                  # index.html · style.css · app.js · favicon.svg
-├── tests/                    # 69 个 pytest 用例
+├── tests/                    # 111 个 pytest 用例
 ├── .verify/                  # Playwright 界面冒烟脚本（不随包发布）
 └── data/                     # SQLite 与配置（已在 .gitignore）
 ```
@@ -127,6 +140,17 @@ gameping/
 | X | — | 全部探测失败 |
 
 有任何丢包降一级；丢包 ≥ 25% 封顶 C；≥ 50% 直接 X；抖动 > 50ms 也降一级。
+
+**顺滑度**是另一套 0–100 分：丢包占 30%、最长连续超时占 25%，平均延迟 25%、抖动 20%。
+因此「平均 40ms 但每分钟连丢两次」会低于「稳定 80ms」——后者才是打游戏真正舒服的链路。
+
+| 顺滑度 | 标签 |
+| --- | --- |
+| ≥ 85 | 顺滑 |
+| ≥ 70 | 良好 |
+| ≥ 50 | 偶有卡顿 |
+| ≥ 30 | 明显卡顿 |
+| < 30 | 不可用 |
 
 ## 配置
 
@@ -148,7 +172,7 @@ gameping/
 
 ```bash
 pip install pytest
-PYTHONPATH=src python -m pytest -q     # 69 passed
+PYTHONPATH=src python -m pytest -q     # 111 passed
 ```
 
 界面冒烟（可选，需要本机 Chrome）：

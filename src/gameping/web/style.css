@@ -259,6 +259,57 @@ dialog menu { display: flex; justify-content: flex-end; gap: 9px; margin: 16px 0
 
 @media (max-width: 760px) {
   header { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }
-  nav { order: 3; width: 100%; overflow-x: auto; }
+  nav { order: 3; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   main { padding: 14px 14px 50px; }
 }
+
+/* ---------- 移动端适配：手机上单手可用的布局 ---------- */
+@media (max-width: 640px) {
+  body { font-size: 15px; }            /* 输入框小于 16px 时 iOS 会自动放大页面 */
+  input[type=text], input[type=number], input[type=search], select { font-size: 16px; padding: 10px 12px; }
+  header { padding: 10px 12px; position: sticky; }
+  .brand small { display: none; }
+  .pill { padding: 4px 9px; font-size: 11px; }
+  nav button { padding: 8px 12px; font-size: 13px; white-space: nowrap; }
+  main { padding: 12px 12px 72px; }
+  .card { padding: 14px 13px; border-radius: 11px; }
+  .grid.k2 { grid-template-columns: 1fr; }
+  .grid.k4 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .tgrid { grid-template-columns: 1fr; }
+  .kpi .v { font-size: 20px; }
+  .tcard .ms { font-size: 22px; }
+  /* 表格横向滚动，避免挤成一团 */
+  .scroll { -webkit-overflow-scrolling: touch; max-height: none; }
+  table { font-size: 12.5px; }
+  th, td { padding: 8px 8px; }
+  button.btn { padding: 10px 14px; }        /* 触控目标够大 */
+  button.btn.sm { padding: 7px 10px; }
+  .chip { padding: 8px 13px; }
+  svg.chart { height: 210px; }
+  .chart-tip { max-width: 62vw; font-size: 11.5px; }
+  .chart-tip .tip-name { max-width: 40vw; }
+  dialog { width: 92vw; padding: 16px; }
+  #toast { left: 12px; right: 12px; bottom: 12px; }
+  #toast div { font-size: 12.5px; }
+}
+
+/* 全面屏底部安全区 */
+@supports (padding: env(safe-area-inset-bottom)) {
+  main { padding-bottom: calc(60px + env(safe-area-inset-bottom)); }
+  header { padding-top: calc(10px + env(safe-area-inset-top)); }
+}
+
+/* ---------- 新增：基线 / 卡顿 / 实例 徽标 ---------- */
+.badge-base { font-size: 10.5px; padding: 1px 6px; border-radius: 5px; font-weight: 600; }
+.base-ok { color: var(--muted); border: 1px solid var(--line); }
+.base-warn { color: #2e2405; background: var(--b); }
+.base-bad { color: #33060c; background: var(--x); }
+.base-good { color: #062e26; background: var(--s); }
+
+.score-bar { height: 5px; border-radius: 999px; background: #0d1420; overflow: hidden; margin-top: 5px; }
+.score-bar > i { display: block; height: 100%; transition: width .3s; }
+.score-s { background: linear-gradient(90deg, #2dd4a7, #35d0ba); }
+.score-a { background: linear-gradient(90deg, #52c07a, #35d0ba); }
+.score-b { background: linear-gradient(90deg, #e8c341, #f0b03c); }
+.score-c { background: linear-gradient(90deg, #f08a3c, #ef5a6f); }
+.score-x { background: #ef5a6f; }

@@ -234,7 +234,9 @@ class Runner:
                 err = type(exc).__name__
             out.append({"target_id": t.id, "ts": ts, "ok": ok,
                         "ms": None if ms is None else round(ms, 1),
-                        "ip": t.ip, "error": err})
+                        "ip": t.ip, "error": err,
+                        # dot 记录本次实际用的地址族，便于事后判断是否走了 IPv6
+                        "dot": "v6" if ":" in (t.ip or "") else "v4"})
         return out
 
     def _sleep_until(self, deadline: float | None, interval: float) -> bool:
@@ -258,8 +260,11 @@ class Runner:
             for row in batch:
                 acc = self._acc.setdefault(
                     row["target_id"],
-                    {"sent": 0, "vals": [], "spark": [], "spark_ts": []})
+                    {"sent": 0, "vals": [], "spark": [], "spark_ts": [], "seq": []})
                 acc["sent"] += 1
+                # seq 保留完整时间序（含超时），卡顿评分与丢包突发要它
+                acc.setdefault("seq", []).append(
+                    (row.get("ts", ""), None if not row["ok"] else row["ms"]))
                 if row["ok"] and row["ms"] is not None:
                     acc["vals"].append(row["ms"])
                     acc["spark"].append(row["ms"])
@@ -273,6 +278,8 @@ class Runner:
         """Per-target live stats from the in-memory aggregate (no DB scan)."""
         if not self.state.session_id:
             return []
+        from .stats import loss_bursts, stutter_score
+        from datetime import datetime as _dt
         out: list[dict] = []
         with self._lock:
             for t in self.state.targets:
@@ -283,5 +290,16 @@ class Runner:
                 d["spark"] = [round(v, 1) for v in acc["spark"]]
                 d["spark_ts"] = list(acc.get("spark_ts") or [])
                 d["group"] = t.get("group", "")
+                # 实时卡顿评分：用带超时点的完整时间序，体感才准
+                seq = acc.get("seq") or []
+                pts = []
+                for ts, ms in seq:
+                    try:
+                        pts.append((_dt.fromisoformat(ts), ms))
+                    except (TypeError, ValueError):
+                        continue
+                d["stutter"] = stutter_score(pts) if pts else None
+                d["bursts"] = loss_bursts(pts) if pts else []
+                d["baseline"] = t.get("baseline")
                 out.append(d)
         return out

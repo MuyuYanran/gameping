@@ -114,6 +114,79 @@ def dns_ping(host: str, timeout: float = 1.0) -> tuple[bool, float | None]:
     return True, float(box["ms"])                 # type: ignore[arg-type]
 
 
+def resolve_all(host: str, timeout: float = 2.0) -> dict:
+    """Resolve a host and report every address, split by family.
+
+    Also flags suspicious answers (loopback / link-local / private ranges) that
+    usually mean DNS hijacking rather than a real CDN edge.
+    """
+    box: dict[str, list[str]] = {"v4": [], "v6": []}
+
+    def work() -> None:
+        try:
+            infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except OSError:
+            return
+        for info in infos:
+            addr = info[4][0]
+            fam = "v6" if info[0] == socket.AF_INET6 else "v4"
+            if addr not in box[fam]:
+                box[fam].append(addr)
+
+    if looks_like_ip(host):
+        fam = "v6" if ":" in host else "v4"
+        box[fam].append(host)
+        return {"v4": box["v4"], "v6": box["v6"], "suspicious": False,
+                "reason": "", "ms": 0.0}
+
+    t0 = time.perf_counter()
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(max(timeout, 0.1))
+    elapsed = (time.perf_counter() - t0) * 1000.0
+    all_addrs = box["v4"] + box["v6"]
+    suspicious, reason = False, ""
+    if all_addrs:
+        bad = [a for a in all_addrs if is_suspicious_address(a)]
+        if bad:
+            suspicious = True
+            reason = f"解析到可疑地址 {', '.join(bad[:3])}（疑似劫持/代理）"
+    return {"v4": box["v4"], "v6": box["v6"], "suspicious": suspicious,
+            "reason": reason, "ms": round(elapsed, 1)}
+
+
+def is_suspicious_address(addr: str) -> bool:
+    """True for loopback / link-local / private / unspecified answers.
+
+    A public game platform resolving to these is almost always a hijack or a
+    hosts-file override, which explains connection failures far better than RTT.
+    """
+    if addr in ("0.0.0.0", "::", "::1"):
+        return True
+    if addr.startswith("127.") or addr.startswith("169.254."):
+        return True
+    if addr.startswith("fe80:") or addr.startswith("fc") or addr.startswith("fd"):
+        return True
+    parts = addr.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        a, b = int(parts[0]), int(parts[1])
+        if a == 10:
+            return True
+        if a == 192 and b == 168:
+            return True
+        if a == 172 and 16 <= b <= 31:
+            return True
+        if a == 100 and 64 <= b <= 127:      # CGNAT，常见于运营商 NAT
+            return False                      # 家庭网络正常，但值得知道
+    return False
+
+
+def https_ping(host: str, port: int = 443, timeout: float = 1.0,
+               path: str = "/") -> tuple[bool, float | None]:
+    """Alias kept for readability: TLS首字节与普通HTTP的TTFB语义一致。"""
+    return http_ping(host, port, timeout, path)
+
+
 def http_ping(host: str, port: int = 443, timeout: float = 1.0,
               path: str = "/") -> tuple[bool, float | None]:
     """Time-to-first-byte of a HEAD request (TTFB)."""
@@ -163,5 +236,6 @@ class ProbeTarget:
         return self.ip
 
 
-__all__ = ["ProbeTarget", "resolve", "tcp_ping", "icmp_ping", "dns_ping",
-           "http_ping", "MODES", "looks_like_ip"]
+__all__ = ["ProbeTarget", "resolve", "resolve_all", "is_suspicious_address",
+           "tcp_ping", "icmp_ping", "dns_ping", "http_ping", "https_ping",
+           "MODES", "looks_like_ip"]

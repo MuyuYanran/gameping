@@ -14,8 +14,14 @@
 - **Scheduled runs** — define "every day at HH:MM for N minutes"; a background scheduler starts the test automatically. Missed occurrences beyond a 30-minute grace window are *not* back-filled (a laptop waking at 09:00 must not fire six tests).
 - **Threshold alerts** — after each session, targets exceeding latency / loss / jitter thresholds produce a stored alert with an unread badge in the header.
 - **Analysis tools** — latency curves (single session or any time window, multi-target overlay), trend (first-third vs last-third), MAD-based spike detection, two-target head-to-head scoring, per-day cross-session trends, and a loss heatmap by hour or weekday. **Hover the curve** for a candlestick-style crosshair readout: the exact timestamp plus every target's individual reading at that moment (not just the bucket average).
+- **Stutter score & loss bursts** — a 0–100 playability score weighting loss and consecutive timeouts above raw RTT (a steady 80 ms link beats a 40 ms link that drops two samples in a row), plus detection of consecutive-failure bursts.
+- **Per-target baselines** — set "what this platform normally measures"; deviations beyond +20 % / +50 % are flagged on every card and in the series data.
+- **DNS diagnostics** — resolve every target and report all A/AAAA addresses, resolution time, and whether the answer looks hijacked (loopback/private/link-local for a public host).
+- **Multi-machine aggregation** — tag imported data with an instance id so several machines can feed one history, and tell "my link is bad" apart from "the platform is down".
 - **Link tagging / link comparison** — label a session with a free-text network note ("wired", "phone hotspot"); the analysis page can then compare two links target-by-target side by side.
-- **Self-contained HTML report** — one file, inline SVG, no external assets; safe to send to a friend.
+- **Self-contained HTML report & standalone SVG chart** — the report is one HTML file with inline SVG; the chart endpoint returns a single SVG that can be dropped into a chat or converted to PNG.
+- **Installable PWA with mobile layout** — add-to-home-screen, offline shell caching, 16 px inputs (no iOS zoom), touch targets ≥32 px, no horizontal scrolling at 390 px.
+- **Zero front-end dependencies** — one HTML, one CSS, one JS file, served by the same FastAPI app.
 - **Import** — bring in external CSV/JSON samples; unknown targets are created automatically.
 - **Export** — CSV (Excel-friendly BOM) and JSON per session; retention purge.
 - **Zero front-end dependencies** — one HTML, one CSS, one JS file, served by the same FastAPI app.
@@ -73,6 +79,13 @@ gameping report -s 12 -o out.html        # self-contained HTML report
 | GET | `/api/sessions/{id}/compare?a=&b=` | head-to-head |
 | GET | `/api/sessions/{id}/export.csv\|json` | download |
 | GET | `/api/sessions/{id}/report.html` | self-contained report (`?download=1` to save) |
+| GET | `/api/sessions/{id}/chart.svg` | standalone SVG chart (`?download=1` to save) |
+| GET | `/api/sessions/{id}/stutter` | playability score + loss bursts per target |
+| GET | `/api/dns/all` | resolve every target, flag hijacks and IPv6 |
+| GET | `/api/dns/check?host=` | resolve one host |
+| GET/POST | `/api/instances` | list / register reporting instances |
+| DELETE | `/api/instances/{id}` | forget an instance |
+| PATCH | `/api/targets/{id}` | also accepts `baseline` (ms) |
 | DELETE | `/api/sessions/{id}` | delete a session |
 | POST | `/api/sessions/import` | import JSON samples |
 | POST | `/api/sessions/import.csv` | import CSV (raw body, `text/csv`) |
@@ -108,10 +121,11 @@ gameping/
 │   ├── scheduler.py          # daily HH:MM scheduler thread
 │   ├── alerts.py             # threshold evaluation
 │   ├── report.py             # self-contained HTML report
+│   ├── export.py             # standalone SVG chart export
 │   ├── api.py                # FastAPI routes + static hosting
 │   ├── cli.py                # serve / test / analyze / report
 │   └── web/                  # index.html · style.css · app.js · favicon.svg
-├── tests/                    # 69 pytest cases
+├── tests/                    # 111 pytest cases
 ├── .verify/                  # Playwright UI smoke script (not shipped)
 └── data/                     # SQLite database + config (git-ignored)
 ```
@@ -127,6 +141,19 @@ gameping/
 | X | — | all probes failed |
 
 Any loss demotes one grade; ≥ 25 % loss caps at C; ≥ 50 % loss is X. Jitter > 50 ms also demotes one grade.
+
+The **stutter score** is a separate 0–100 number. It weights loss (30 %) and the longest
+consecutive-timeout run (25 %) above average latency (25 %) and jitter (20 %), so a link
+that averages 40 ms but drops two packets in a row every minute scores worse than a
+steady 80 ms link — which is what actually ruins a match.
+
+| Stutter score | Label |
+| --- | --- |
+| ≥ 85 | smooth |
+| ≥ 70 | good |
+| ≥ 50 | occasional hitching |
+| ≥ 30 | clearly laggy |
+| < 30 | unusable |
 
 ## Configuration
 
@@ -148,7 +175,7 @@ Any loss demotes one grade; ≥ 25 % loss caps at C; ≥ 50 % loss is X. Jitter 
 
 ```bash
 pip install pytest
-PYTHONPATH=src python -m pytest -q     # 69 passed
+PYTHONPATH=src python -m pytest -q     # 111 passed
 ```
 
 UI smoke check (optional, needs a local Chrome):

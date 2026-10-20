@@ -1,6 +1,6 @@
 // 界面验收脚本：跑真实测试并截图，同时收集控制台错误。
 // 用法：node verify.js   （需要先启动 python -m gameping serve）
-const { chromium } = require('playwright');
+const { chromium, devices } = require('playwright');
 const fs = require('fs');
 
 const BASE = 'http://127.0.0.1:8848';
@@ -126,15 +126,77 @@ fs.mkdirSync(OUT, { recursive: true });
     return { status: r.status, len: (await r.text()).length };
   }, sessionId);
 
-  // 目标管理
+  // 目标管理：基线 / DNS 体检 / 实例 / SVG 导出
   await page.click('nav button[data-view="targets"]');
   await page.waitForTimeout(2000);
   await page.screenshot({ path: OUT + '/targets.png' });
 
+  const baselineInputs = await page.locator('[data-baseline]').count();
+  await page.fill('[data-baseline]:first-of-type', '45');
+  await page.locator('[data-baseline]').first().dispatchEvent('change');
+  await page.waitForTimeout(800);
+
+  await page.click('#btnDnsCheck');
+  await page.waitForTimeout(6000);
+  const dnsRows = await page.locator('#dnsRows tr').count();
+  const dnsStatuses = await page.evaluate(() =>
+    [...new Set([...document.querySelectorAll('#dnsRows tr')]
+      .map(r => r.lastElementChild?.innerText?.trim()).filter(Boolean))]);
+
+  await page.fill('#instId', 'verify-inst');
+  await page.fill('#instNote', '冒烟测试');
+  await page.click('#btnAddInstance');
+  await page.waitForTimeout(1200);
+  const instRows = await page.locator('#instRows tr').count();
+
+  const svgInfo = await page.evaluate(async (sid) => {
+    const r = await fetch(`/api/sessions/${sid}/chart.svg`);
+    const t = await r.text();
+    return { status: r.status, len: t.length, isSvg: t.startsWith('<svg') };
+  }, sessionId);
+
+  // 顺滑度与评分条
+  const stutterInfo = await page.evaluate(async (sid) => {
+    const r = await fetch(`/api/sessions/${sid}/stutter`);
+    const j = await r.json();
+    const first = j.items && j.items[0];
+    return { status: r.status, worst: j.worst,
+             score: first ? first.stutter.score : null,
+             bursts: first ? first.bursts.length : null };
+  }, sessionId);
+
+  // PWA
+  const pwaInfo = await page.evaluate(async () => {
+    const man = await (await fetch('/manifest.webmanifest')).json();
+    const sw = await fetch('/sw.js');
+    const reg = 'serviceWorker' in navigator
+      ? await navigator.serviceWorker.getRegistration().then(r => !!r).catch(() => false) : null;
+    return { display: man.display, icons: man.icons.length,
+             swStatus: sw.status, swRegistered: reg };
+  });
+
+  // 移动端布局（iPhone 14 视口）
+  const mobCtx = await browser.newContext({ ...devices['iPhone 14'] });
+  const mob = await mobCtx.newPage();
+  mob.on('pageerror', e => errors.push('MOBILE: ' + e.message));
+  await mob.goto(BASE, { waitUntil: 'networkidle' });
+  await mob.waitForTimeout(2200);
+  await mob.screenshot({ path: OUT + '/mobile.png' });
+  const mobileInfo = await mob.evaluate(() => ({
+    viewport: [window.innerWidth, window.innerHeight],
+    overflowX: document.documentElement.scrollWidth > window.innerWidth + 2,
+    smallTouchTargets: [...document.querySelectorAll('button.btn, nav button')]
+      .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height < 32; }).length,
+    inputFontSizes: [...new Set([...document.querySelectorAll('input[type=text], input[type=number]')]
+      .map(i => getComputedStyle(i).fontSize))],
+  }));
+  await mobCtx.close();
+
   console.log(JSON.stringify({
     errors, liveCount, heatCells, trendRows, schedRows,
     sessionId, reportStatus, chartInfo, hoverInfo, hoverHides,
-    noteInfo, noteCompare,
+    noteInfo, noteCompare, baselineInputs, dnsRows, dnsStatuses,
+    instRows, svgInfo, stutterInfo, pwaInfo, mobileInfo,
   }, null, 2));
 
   await browser.close();

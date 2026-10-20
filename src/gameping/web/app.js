@@ -104,7 +104,7 @@ function switchView(name) {
   if (name === 'history') loadSessions();
   if (name === 'analysis') { loadAnalysisSessions(); loadNotes(); }
   if (name === 'schedules') { loadSchedules(); }
-  if (name === 'targets') loadTargets();
+  if (name === 'targets') { loadTargets(); loadInstances(); }
   if (name === 'live') loadTargetPicker();
 }
 
@@ -227,7 +227,7 @@ function renderLive(d) {
   const grid = $('#liveGrid');
   if (!stats.length) {
     grid.innerHTML = `<div class="empty">点击「开始测试」后，这里会实时显示各平台延迟</div>`;
-    ['#kpiBest', '#kpiWorst', '#kpiLoss', '#kpiJitter'].forEach(s => $(s).textContent = '—');
+    ['#kpiBest', '#kpiWorst', '#kpiLoss', '#kpiStutter'].forEach(s => $(s).textContent = '—');
     return;
   }
   const valid = stats.filter(s => s.avg !== null);
@@ -235,22 +235,30 @@ function renderLive(d) {
   const worst = valid.length ? valid.reduce((a, b) => a.avg >= b.avg ? a : b) : null;
   const totalSent = stats.reduce((n, s) => n + s.sent, 0);
   const totalRecv = stats.reduce((n, s) => n + s.recv, 0);
-  const jitters = stats.filter(s => s.jitter !== null).map(s => s.jitter);
 
   $('#kpiBest').innerHTML = best ? `${fmtMs(best.avg)}<small>ms ${best.target}</small>` : '—';
   $('#kpiWorst').innerHTML = worst ? `${fmtMs(worst.avg)}<small>ms ${worst.target}</small>` : '—';
   $('#kpiLoss').innerHTML = totalSent ? `${fmtPct((totalSent - totalRecv) * 100 / totalSent)}`
                                       : '—';
-  $('#kpiJitter').innerHTML = jitters.length
-    ? `${fmtMs(jitters.reduce((a, b) => a + b, 0) / jitters.length)}<small>ms</small>` : '—';
+  // 顺滑度比平均延迟更贴近体感：会惩罚抖动和连续超时
+  const scored = stats.filter(s => s.stutter && s.sent >= 3).map(s => s.stutter.score);
+  $('#kpiStutter').innerHTML = scored.length
+    ? `${fmtMs(scored.reduce((a, b) => a + b, 0) / scored.length)}<small>/100</small>` : '—';
 
   grid.innerHTML = stats.map((s, i) => {
     const color = COLORS[i % COLORS.length];
+    const st = s.stutter;
+    const scoreCls = !st ? 'score-x' : st.score >= 85 ? 'score-s' : st.score >= 70 ? 'score-a'
+      : st.score >= 50 ? 'score-b' : 'score-c';
+    const base = s.baseline;
+    const baseBadge = base
+      ? `<span class="badge-base base-${base.level}" title="基线 ${base.baseline}ms">${
+          base.pct > 0 ? '+' : ''}${base.pct}%</span>` : '';
     return `<div class="tcard">
       <div class="top">
         <div style="min-width:0">
-          <div class="name">${s.target}</div>
-          <div class="host">${s.host}${s.proto === 'icmp' ? ' · icmp' : ''}</div>
+          <div class="name">${s.target}${baseBadge}</div>
+          <div class="host">${s.host}${s.proto && s.proto !== 'tcp' ? ' · ' + s.proto : ''}</div>
         </div>
         ${badge(s.grade)}
       </div>
@@ -261,6 +269,11 @@ function renderLive(d) {
         <span>抖动 ${fmtMs(s.jitter)}</span>
         <span>丢 ${fmtPct(s.loss)}</span>
       </div>
+      ${st ? `<div class="sub" style="margin-top:5px">
+        <span>顺滑度 ${fmtMs(st.score)} · ${st.label}</span>
+        ${st.worst_burst ? `<span class="tip-loss">连丢 ${st.worst_burst} 次</span>` : ''}
+      </div>
+      <div class="score-bar"><i class="${scoreCls}" style="width:${st.score}%"></i></div>` : ''}
       ${sparkline(s.spark, color, 240, 34, s.spark_ts)}
     </div>`;
   }).join('');
@@ -311,6 +324,7 @@ async function showSession(id) {
     $('#btnExportCsv').onclick = () => download(`/api/sessions/${id}/export.csv`);
     $('#btnExportJson').onclick = () => download(`/api/sessions/${id}/export.json`);
     $('#btnExportHtml').onclick = () => window.open(`/api/sessions/${id}/report.html`, '_blank');
+    $('#btnExportSvg').onclick = () => exportChartSvg(id);
     $('#btnLoadChart').onclick = () => {
       switchView('analysis');
       $('#anMode').value = 'session';
@@ -1037,6 +1051,85 @@ async function compareNotes() {
   }
 }
 
+/* ---------------- DNS 体检 ---------------- */
+async function loadDns() {
+  const body = $('#dnsRows');
+  body.innerHTML = `<tr><td colspan="6" class="hint">解析中…</td></tr>`;
+  try {
+    const data = await api('/api/dns/all');
+    if (!data.items.length) {
+      body.innerHTML = `<tr><td colspan="6" class="hint">没有启用的目标</td></tr>`;
+      return;
+    }
+    body.innerHTML = data.items.map(d => {
+      const status = d.suspicious
+        ? `<span class="badge-base base-bad" title="${d.reason}">疑似劫持</span>`
+        : d.v4.length ? '<span class="g-A">正常</span>'
+          : '<span class="badge-base base-bad">解析失败</span>';
+      return `<tr>
+        <td style="text-align:left">${d.target}</td>
+        <td style="text-align:left" class="mono">${d.host}</td>
+        <td class="num">${fmtMs(d.ms)}ms</td>
+        <td style="text-align:left" class="mono" style="color:var(--dim)">${d.v4.slice(0, 2).join(', ') || '—'}${d.v4.length > 2 ? ` +${d.v4.length - 2}` : ''}</td>
+        <td style="text-align:left" class="mono" style="color:var(--dim)">${d.v6.length ? d.v6[0] : '无'}</td>
+        <td>${status}</td>
+      </tr>`;
+    }).join('');
+    const hijacked = data.items.filter(d => d.suspicious);
+    if (hijacked.length) {
+      toast(`${hijacked.length} 个目标疑似 DNS 劫持：${hijacked.map(h => h.target).join('、')}`, true);
+    }
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="hint">${e.message}</td></tr>`;
+  }
+}
+
+/* ---------------- 多机实例 ---------------- */
+async function loadInstances() {
+  const body = $('#instRows');
+  try {
+    const { items } = await api('/api/instances');
+    if (!items.length) {
+      body.innerHTML = `<tr><td colspan="6" class="hint">还没有其它机器上报过</td></tr>`;
+      return;
+    }
+    body.innerHTML = items.map(i => `<tr>
+      <td style="text-align:left" class="mono">${i.id}</td>
+      <td style="text-align:left">${i.label || '—'}</td>
+      <td class="num">${i.samples}</td>
+      <td class="num">${fmtTime(i.first_seen)}</td>
+      <td class="num">${fmtTime(i.last_seen)}</td>
+      <td><button class="btn sm danger" data-del-inst="${i.id}">移除</button></td>
+    </tr>`).join('');
+    $$('[data-del-inst]').forEach(b => b.onclick = async () => {
+      if (!confirm('移除该实例记录？已导入的样本不会删除。')) return;
+      try { await api(`/api/instances/${encodeURIComponent(b.dataset.delInst)}`,
+        { method: 'DELETE' }); loadInstances(); }
+      catch (e) { toast(e.message, true); }
+    });
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="hint">${e.message}</td></tr>`;
+  }
+}
+
+async function registerInstance() {
+  const id = $('#instId').value.trim();
+  if (!id) { toast('先填实例标识', true); return; }
+  try {
+    await api('/api/instances', { method: 'POST',
+      body: { id, label: id, note: $('#instNote').value.trim() } });
+    toast(`已登记 ${id}`);
+    loadInstances();
+  } catch (e) { toast(e.message, true); }
+}
+
+/* ---------------- 图表导出 ---------------- */
+function exportChartSvg(sessionId) {
+  // 直接用后端生成的独立 SVG，浏览器打开后可另存或右键「图片另存为」
+  window.open(`/api/sessions/${sessionId}/chart.svg?title=${encodeURIComponent('GamePing 会话 #' + sessionId)}`,
+    '_blank');
+}
+
 /* ---------------- import ---------------- */
 async function importCsv(file) {
   const text = await file.text();
@@ -1069,6 +1162,9 @@ async function loadTargets() {
       <td>${t.proto.toUpperCase()}</td>
       <td style="text-align:left">${t.grp || '—'}</td>
       <td class="mono" style="color:var(--dim)">${t.ip || '—'}</td>
+      <td><input type="number" min="0" step="1" value="${t.baseline ?? ''}"
+           data-baseline="${t.id}" placeholder="—"
+           style="width:66px;padding:4px 6px;font-size:12px"></td>
       <td>${t.enabled ? '<span class="g-A">● 启用</span>' : '<span class="hint">○ 停用</span>'}</td>
       <td>
         <button class="btn sm ghost" data-probe="${t.id}">测试</button>
@@ -1076,6 +1172,19 @@ async function loadTargets() {
         <button class="btn sm danger" data-del="${t.id}">删除</button>
       </td>
     </tr>`).join('');
+    // 基线：失焦即保存，空值表示清除
+    $$('[data-baseline]').forEach(inp => {
+      inp.onchange = async () => {
+        const raw = inp.value.trim();
+        try {
+          await api(`/api/targets/${inp.dataset.baseline}`, {
+            method: 'PATCH',
+            body: { baseline: raw === '' ? null : Number(raw) },
+          });
+          toast(raw === '' ? '已清除基线' : `基线设为 ${raw}ms`);
+        } catch (e) { toast(e.message, true); }
+      };
+    });
     $$('[data-probe]').forEach(b => b.onclick = async () => {
       b.disabled = true; b.textContent = '…';
       try {
@@ -1179,6 +1288,10 @@ function boot() {
   $('#btnAddTarget').onclick = openTargetDialog;
   $('#formTarget').onsubmit = submitTarget;
   $('#btnProbeAll').onclick = probeAll;
+  $('#btnDnsCheck').onclick = loadDns;
+  $('#btnDnsRefresh').onclick = loadDns;
+  $('#btnAddInstance').onclick = registerInstance;
+  $('#btnInstRefresh').onclick = loadInstances;
 
   // 定时与告警
   $('#btnAddSched').onclick = openScheduleDialog;
@@ -1203,6 +1316,13 @@ function boot() {
   });
   // 告警角标定期刷新
   setInterval(loadAlerts, 30000);
+
+  // PWA：注册 service worker（失败不影响功能，比如 http 访问非 localhost 时浏览器会拒绝）
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+  }
 }
 
 document.addEventListener('DOMContentLoaded', boot);

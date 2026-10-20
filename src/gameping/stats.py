@@ -191,5 +191,137 @@ def compare(a: Stat, b: Stat) -> dict:
             "score_b": r1(sb) if sb < 1e8 else None}
 
 
+# ---------------------------------------------------------------------------
+# 卡顿分析：丢包突发 + 体感评分
+# ---------------------------------------------------------------------------
+
+# 连续多少次超时算一次「丢包突发」，以及多短的间隔内算「同一串」
+BURST_MIN_LEN = 2
+BURST_GAP_SECONDS = 90.0
+# 体感评分的参考点：延迟 40ms 视为满分基线
+SMOOTH_BASE_MS = 40.0
+
+
+def loss_bursts(points: Sequence[tuple[datetime, float | None]],
+                min_len: int = BURST_MIN_LEN,
+                gap: float = BURST_GAP_SECONDS) -> list[dict]:
+    """Find runs of consecutive failures — the thing players actually feel.
+
+    A single dropped sample is noise; two or more in a row is a visible hitch.
+    Runs separated by more than `gap` seconds are treated as separate events
+    (the sampling interval may vary between sessions).
+    """
+    bursts: list[dict] = []
+    run: list[datetime] = []
+    for ts, rtt in points:
+        if rtt is None:
+            if run and (ts - run[-1]).total_seconds() > gap:
+                _flush(run, bursts, min_len)
+                run = []
+            run.append(ts)
+        else:
+            _flush(run, bursts, min_len)
+            run = []
+    _flush(run, bursts, min_len)
+    bursts.sort(key=lambda b: b["count"], reverse=True)
+    return bursts
+
+
+def _flush(run: list[datetime], out: list[dict], min_len: int) -> None:
+    if len(run) < min_len:
+        return
+    start, end = run[0], run[-1]
+    out.append({
+        "start": start.isoformat(timespec="seconds"),
+        "end": end.isoformat(timespec="seconds"),
+        "count": len(run),
+        "seconds": round((end - start).total_seconds(), 1),
+    })
+
+
+def stutter_score(points: Sequence[tuple[datetime, float | None]]) -> dict:
+    """A 0-100 playability score that weights what hurts gameplay.
+
+    Unlike the letter grade (which is mostly about average RTT), this rewards
+    smoothness: a steady 80 ms link scores better than a 40 ms link that spikes
+    to 400 ms twice a minute. Breakdown is returned so the UI can explain it.
+    """
+    vals = [p[1] for p in points if p[1] is not None]
+    sent = len(points)
+    if not vals or sent == 0:
+        return {"score": 0.0, "label": "不可用", "reason": "全部探测失败",
+                "parts": {"latency": 0, "jitter": 0, "loss": 0, "burst": 0},
+                "bursts": 0, "worst_burst": 0}
+
+    avg = mean(vals)
+    jitter = pstdev(vals) if len(vals) > 1 else 0.0
+    loss = (sent - len(vals)) * 100.0 / sent
+    bursts = loss_bursts(points)
+
+    # 各分项 0..1，越高越好
+    latency_part = max(0.0, min(1.0, SMOOTH_BASE_MS / avg if avg > 0 else 1.0))
+    jitter_part = max(0.0, 1.0 - jitter / 120.0)
+    loss_part = max(0.0, 1.0 - loss / 20.0)
+    worst = max((b["count"] for b in bursts), default=0)
+    burst_part = max(0.0, 1.0 - worst / 6.0)
+
+    # 权重：丢包与突发最伤体感，延迟次之，抖动再次
+    score = (latency_part * 0.25 + jitter_part * 0.20
+             + loss_part * 0.30 + burst_part * 0.25) * 100.0
+
+    if score >= 85:
+        label = "顺滑"
+    elif score >= 70:
+        label = "良好"
+    elif score >= 50:
+        label = "偶有卡顿"
+    elif score >= 30:
+        label = "明显卡顿"
+    else:
+        label = "不可用"
+
+    reasons = []
+    if loss >= 5:
+        reasons.append(f"丢包 {loss:.1f}%")
+    if worst >= BURST_MIN_LEN:
+        reasons.append(f"最长连续超时 {worst} 次")
+    if jitter > 50:
+        reasons.append(f"抖动 {jitter:.0f}ms")
+    if avg > 110:
+        reasons.append(f"平均延迟 {avg:.0f}ms")
+
+    return {
+        "score": round(score, 1),
+        "label": label,
+        "reason": "、".join(reasons) if reasons else "各项稳定",
+        "parts": {
+            "latency": round(latency_part, 3),
+            "jitter": round(jitter_part, 3),
+            "loss": round(loss_part, 3),
+            "burst": round(burst_part, 3),
+        },
+        "bursts": len(bursts),
+        "worst_burst": worst,
+    }
+
+
+def baseline_delta(stat: "Stat", baseline: float | None) -> dict | None:
+    """Compare a measurement against a user-set normal value for that target."""
+    if baseline is None or baseline <= 0 or stat.avg is None:
+        return None
+    delta = stat.avg - baseline
+    pct = delta * 100.0 / baseline
+    level = "ok"
+    if pct >= 50:
+        level = "bad"
+    elif pct >= 20:
+        level = "warn"
+    elif pct <= -20:
+        level = "good"
+    return {"baseline": round(baseline, 1), "delta": r1(delta),
+            "pct": round(pct, 1), "level": level}
+
+
 __all__ = ["Stat", "summarize", "percentile", "grade_of", "bucketize",
-           "trend", "spikes", "compare", "GRADE_ORDER"]
+           "trend", "spikes", "compare", "loss_bursts", "stutter_score",
+           "baseline_delta", "GRADE_ORDER"]

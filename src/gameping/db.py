@@ -23,7 +23,6 @@ CREATE TABLE IF NOT EXISTS target (
     note        TEXT    NOT NULL DEFAULT '',
     created_at  TEXT    NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS session (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at  TEXT    NOT NULL,
@@ -48,6 +47,16 @@ CREATE TABLE IF NOT EXISTS sample (
     ms         REAL,
     ip         TEXT    NOT NULL DEFAULT '',
     error      TEXT    NOT NULL DEFAULT ''
+);
+
+-- 多机器汇总：每个上报实例一行，用于区分「我这条网的问题」还是「平台挂了」
+CREATE TABLE IF NOT EXISTS instance (
+    id          TEXT PRIMARY KEY,             -- 实例标识（机器名或自定义）
+    label       TEXT NOT NULL DEFAULT '',     -- 展示名
+    note        TEXT NOT NULL DEFAULT '',     -- 备注（如「台式·有线」）
+    last_seen   TEXT NOT NULL,
+    first_seen  TEXT NOT NULL,
+    samples     INTEGER NOT NULL DEFAULT 0    -- 累计上报样本数
 );
 
 CREATE INDEX IF NOT EXISTS idx_sample_session ON sample(session_id, target_id, id);
@@ -120,7 +129,16 @@ class Database:
                       " ON schedule(name, at_time)")
             # 1.1: alert 表新增前的库没有该表，executescript 已建好，这里只保证索引存在
             c.execute("CREATE INDEX IF NOT EXISTS idx_alert_seen ON alert(seen, id)")
+            self._add_column(c, "target", "baseline", "REAL")
+            self._add_column(c, "sample", "dot", "TEXT NOT NULL DEFAULT ''")
             c.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
+
+    @staticmethod
+    def _add_column(c: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        """Add a column when an older database predates it (SQLite has no IF NOT EXISTS)."""
+        cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     # ---------- connection plumbing ----------
     def _connect(self) -> sqlite3.Connection:
@@ -213,7 +231,7 @@ class Database:
         return got
 
     def update_target(self, target_id: int, **fields: Any) -> dict[str, Any] | None:
-        allowed = {"name", "host", "port", "proto", "grp", "enabled", "note"}
+        allowed = {"name", "host", "port", "proto", "grp", "enabled", "note", "baseline"}
         patch = {k: v for k, v in fields.items() if k in allowed}
         if not patch:
             return self.get_target(target_id)
@@ -276,20 +294,20 @@ class Database:
     def add_samples(self, session_id: int, rnd: int, rows: Iterable[dict[str, Any]]) -> int:
         payload = [
             (session_id, r["target_id"], r["ts"], rnd, 1 if r["ok"] else 0,
-             r.get("ms"), r.get("ip", ""), r.get("error", ""))
+             r.get("ms"), r.get("ip", ""), r.get("error", ""), r.get("dot", ""))
             for r in rows
         ]
         if not payload:
             return 0
         with self.tx() as c:
             c.executemany(
-                "INSERT INTO sample(session_id, target_id, ts, rnd, ok, ms, ip, error)"
-                " VALUES(?,?,?,?,?,?,?,?)", payload)
+                "INSERT INTO sample(session_id, target_id, ts, rnd, ok, ms, ip, error, dot)"
+                " VALUES(?,?,?,?,?,?,?,?,?)", payload)
         return len(payload)
 
     def fetch_samples(self, session_id: int, target_id: int | None = None,
                       since_round: int = 0) -> list[dict[str, Any]]:
-        sql = ("SELECT s.ts, s.rnd, s.ok, s.ms, s.ip, s.error, t.name AS target,"
+        sql = ("SELECT s.ts, s.rnd, s.ok, s.ms, s.ip, s.error, s.dot, t.name AS target,"
                " t.host, t.proto, s.target_id"
                " FROM sample s JOIN target t ON t.id = s.target_id"
                " WHERE s.session_id=? AND s.rnd>=?")
@@ -341,6 +359,41 @@ class Database:
         for sid in ids:
             self.delete_session(int(sid))
         return len(ids)
+
+    # ---------- instances (multi-machine aggregation) ----------
+    def touch_instance(self, instance_id: str, *, label: str = "",
+                       note: str = "", sample_delta: int = 0) -> dict[str, Any]:
+        """Upsert a reporting instance and bump its counters."""
+        if not instance_id:
+            raise ValueError("instance 不能为空")
+        now = now_iso()
+        with self.tx() as c:
+            row = c.execute("SELECT * FROM instance WHERE id=?", (instance_id,)).fetchone()
+            if row:
+                c.execute(
+                    "UPDATE instance SET last_seen=?,"
+                    " label=CASE WHEN ?<>'' THEN ? ELSE label END,"
+                    " note=CASE WHEN ?<>'' THEN ? ELSE note END,"
+                    " samples=samples+? WHERE id=?",
+                    (now, label, label, note, note, int(sample_delta), instance_id))
+            else:
+                c.execute(
+                    "INSERT INTO instance(id, label, note, last_seen, first_seen, samples)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (instance_id, label or instance_id, note, now, now,
+                     int(sample_delta)))
+            got = c.execute("SELECT * FROM instance WHERE id=?", (instance_id,)).fetchone()
+            return dict(got)
+
+    def list_instances(self) -> list[dict[str, Any]]:
+        with self.conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT * FROM instance ORDER BY last_seen DESC").fetchall()]
+
+    def delete_instance(self, instance_id: str) -> bool:
+        with self.tx() as c:
+            return c.execute("DELETE FROM instance WHERE id=?",
+                             (instance_id,)).rowcount > 0
 
     def stats_overview(self) -> dict[str, Any]:
         with self.conn() as c:
@@ -572,15 +625,19 @@ class Database:
 
     # ---------- import ----------
     def import_samples(self, rows: Iterable[dict[str, Any]], *, note: str = "",
-                       target_map: dict[str, int] | None = None) -> dict[str, Any]:
+                       target_map: dict[str, int] | None = None,
+                       instance: str = "", label: str = "") -> dict[str, Any]:
         """把外部 CSV/JSON 样本导入成一个新会话。
 
         rows: {ts, target|target_id, ok, ms, ip?}。未匹配到的目标会被自动创建
         （host 取 target 字段本身，端口 443），保证导入不丢数据。
+        `instance` 标识上报来源机器，用于多机汇总时区分数据是谁测的。
         """
         rows = list(rows)
         if not rows:
             return {"session_id": None, "imported": 0, "created_targets": []}
+        if instance:
+            self.touch_instance(instance, label=label, sample_delta=len(rows))
         created: list[str] = []
         resolve_cache: dict[str, int | None] = dict(target_map or {})
         by_name = {t["name"]: t["id"] for t in self.list_targets(enabled_only=False)}

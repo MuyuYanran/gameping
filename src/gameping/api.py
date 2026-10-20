@@ -18,7 +18,8 @@ from .db import Database
 from .probe import ProbeTarget, resolve
 from .runner import Runner
 from .scheduler import Scheduler, due_now, parse_hhmm
-from .stats import Stat, bucketize, compare, spikes, summarize, trend
+from .stats import (Stat, baseline_delta, bucketize, compare, loss_bursts,
+                    spikes, stutter_score, summarize, trend)
 
 from . import alerts as alert_rules
 from .report import build_report
@@ -39,6 +40,12 @@ class TargetReq(BaseModel):
     port: int = Field(default=443, ge=1, le=65535)
     proto: Literal["tcp", "icmp", "dns", "http"] = "tcp"
     group: str = ""
+    note: str = ""
+
+
+class InstanceReq(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    label: str = ""
     note: str = ""
 
 
@@ -105,6 +112,22 @@ def create_app(db_path: str | None = None) -> FastAPI:
     def favicon():
         icon = WEB_DIR / "favicon.svg"
         return FileResponse(icon) if icon.exists() else Response(status_code=204)
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker():
+        """Service worker must be served from the root to control the whole scope."""
+        path = WEB_DIR / "sw.js"
+        if not path.exists():
+            raise HTTPException(404, "sw.js 缺失")
+        return FileResponse(path, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def manifest():
+        path = WEB_DIR / "manifest.webmanifest"
+        if not path.exists():
+            raise HTTPException(404, "manifest 缺失")
+        return FileResponse(path, media_type="application/manifest+json")
 
     # ==================== 状态 ====================
     @app.get("/api/health")
@@ -182,7 +205,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
     @app.get("/api/session/live")
     def live():
         state = runner.state.snapshot()
-        state["stats"] = runner.live_stats() if state["session_id"] else []
+        stats = runner.live_stats() if state["session_id"] else []
+        state["stats"] = stats
+        # 汇总一次整体卡顿评分（只算已收满样本的目标，避免早期噪声）
+        scored = [s["stutter"]["score"] for s in stats
+                  if s.get("stutter") and s.get("sent", 0) >= 3]
+        state["stutter_avg"] = round(sum(scored) / len(scored), 1) if scored else None
         return state
 
     # ==================== 历史 ====================
@@ -227,6 +255,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
             # 桶数不超过样本数，避免大量空桶；每桶内含原始读数供悬停使用
             nb = min(buckets, len(samples))
             row = info.get(tid, {})
+            target_row = db.get_target(tid) or {}
+            vals = [s["ms"] for s in samples if s["ok"] and s["ms"] is not None]
+            st = summarize(vals, len(samples), target_id=tid,
+                           target=row.get("target", str(tid)),
+                           host=row.get("host", ""), proto=row.get("proto", "tcp"))
             result.append({
                 "target_id": tid,
                 "target": row.get("target", str(tid)),
@@ -236,6 +269,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 "points": bucketize(pts, nb),
                 "trend": trend(pts),
                 "spikes": spikes(pts),
+                "bursts": loss_bursts(pts),
+                "stutter": stutter_score(pts),
+                "baseline": baseline_delta(st, target_row.get("baseline")),
                 "raw_count": len(samples),
             })
         return {"session_id": session_id, "series": result}
@@ -263,6 +299,23 @@ def create_app(db_path: str | None = None) -> FastAPI:
                                    Stat(**{k: sb[k] for k in Stat.__slots__}))}
 
     # ==================== 导出 ====================
+    @app.get("/api/sessions/{session_id}/chart.svg")
+    def export_chart(session_id: int, download: bool = False, title: str = ""):
+        """单文件 SVG 图表，可直接发群或转 PNG。"""
+        from .export import build_svg
+
+        try:
+            svg = build_svg(db, session_id, title=title)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = \
+                f'attachment; filename="gameping-chart-{session_id}.svg"'
+        return Response(svg, media_type="image/svg+xml; charset=utf-8", headers=headers)
+
     @app.get("/api/sessions/{session_id}/export.csv")
     def export_csv(session_id: int):
         s = db.get_session(session_id)
@@ -408,8 +461,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if not isinstance(rows, list) or not rows:
             raise HTTPException(400, "samples 不能为空")
         try:
-            # 备注只保留调用方真正给出的值，避免用来源标记污染「链路」筛选
-            return db.import_samples(rows, note=str(payload.get("note") or ""))
+            # 备注只保留调用方真正给出的值；instance 用于多机汇总来源
+            return db.import_samples(rows,
+                                     note=str(payload.get("note") or ""),
+                                     instance=str(payload.get("instance") or ""),
+                                     label=str(payload.get("label") or ""))
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, f"导入失败：{exc}") from exc
 
@@ -508,6 +564,82 @@ def create_app(db_path: str | None = None) -> FastAPI:
         removed = db.purge_older_than(days)
         return {"removed_sessions": removed, "days": days}
 
+    # ==================== 多机汇总 ====================
+    @app.get("/api/instances")
+    def list_instances():
+        return {"items": db.list_instances()}
+
+    @app.post("/api/instances", status_code=201)
+    def upsert_instance(req: InstanceReq):
+        return db.touch_instance(req.id, label=req.label, note=req.note)
+
+    @app.delete("/api/instances/{instance_id}")
+    def remove_instance(instance_id: str):
+        if not db.delete_instance(instance_id):
+            raise HTTPException(404, "实例不存在")
+        return {"deleted": instance_id}
+
+    # ==================== DNS 解析诊断 ====================
+    @app.get("/api/dns/check")
+    def dns_check(host: str | None = None, target_id: int | None = None):
+        """解析目标并报告所有地址、是否疑似劫持、有无 IPv6。"""
+        from .probe import resolve_all
+
+        if target_id is not None:
+            t = db.get_target(target_id)
+            if not t:
+                raise HTTPException(404, "目标不存在")
+            host = t["host"]
+        if not host:
+            raise HTTPException(400, "需要 host 或 target_id")
+        info = resolve_all(host)
+        info["host"] = host
+        # 该主机在库里最近一次实际使用的地址族
+        return info
+
+    @app.get("/api/dns/all")
+    def dns_all():
+        """批量解析所有启用目标，一次看清哪个域名被污染或没有 IPv6。"""
+        from .probe import resolve_all
+
+        out = []
+        for t in db.list_targets():
+            info = resolve_all(t["host"])
+            out.append({
+                "target_id": t["id"], "target": t["name"], "host": t["host"],
+                "v4": info["v4"], "v6": info["v6"],
+                "suspicious": info["suspicious"], "reason": info["reason"],
+                "ms": info["ms"],
+            })
+        return {"items": out, "count": len(out)}
+
+    # ==================== 卡顿分析 ====================
+    @app.get("/api/sessions/{session_id}/stutter")
+    def session_stutter(session_id: int):
+        """整段会话的卡顿评分、丢包突发与体感问题清单。"""
+        if not db.get_session(session_id):
+            raise HTTPException(404, "会话不存在")
+        out = []
+        for row in db.session_summary(session_id):
+            tid = row["target_id"]
+            samples = db.fetch_samples(session_id, target_id=tid)
+            pts = [(_dt(s["ts"]), s["ms"] if s["ok"] else None) for s in samples]
+            target_row = db.get_target(tid) or {}
+            vals = [s["ms"] for s in samples if s["ok"] and s["ms"] is not None]
+            st = summarize(vals, len(samples), target_id=tid, target=row["target"],
+                           host=row["host"], proto=row["proto"])
+            out.append({
+                "target_id": tid, "target": row["target"], "group": row.get("grp", ""),
+                "stutter": stutter_score(pts),
+                "bursts": loss_bursts(pts),
+                "baseline": baseline_delta(st, target_row.get("baseline")),
+                "avg": st.avg, "loss": st.loss, "jitter": st.jitter,
+            })
+        out.sort(key=lambda x: x["stutter"]["score"])
+        return {"session_id": session_id, "items": out,
+                "worst": out[0]["target"] if out else None}
+
+    # ==================== 多机汇总 ====================
     @app.get("/api/stats/overview")
     def overview():
         return db.stats_overview()
