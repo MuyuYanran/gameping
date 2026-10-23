@@ -29,14 +29,28 @@
 
 ## 快速开始
 
+请用项目自带的虚拟环境，别依赖 `PATH` 里的裸 `python`——它可能被别的 Python 抢走
+（MySQL Workbench 自带的 `python.exe` 是个残废解释器：没有 `pip`、没有任何依赖，还会多打一行
+`Could not find platform independent libraries <prefix>`）。
+
 ```bash
+python -m venv .venv                     # 只需第一次
+.\.venv\Scripts\Activate.ps1             # PowerShell（cmd 用 .venv\Scripts\activate.bat）
+
 pip install -r requirements.txt          # 只依赖 fastapi + uvicorn
 
-python -m gameping serve                # http://127.0.0.1:8848
-python -m gameping serve --port 9000    # 换端口
+python run.py                            # http://127.0.0.1:8848
+python run.py serve --port 9000          # 换端口
 ```
 
-项目根目录也可以直接 `python run.py`。
+不想激活就直接点名解释器，任何 shell、任何 `PATH` 顺序都可靠：
+
+```bash
+.\.venv\Scripts\python.exe run.py
+.\.venv\Scripts\python.exe run.py serve --port 9000
+```
+
+命令行的 `gameping` 入口和 `python -m gameping …` 需要先装包：在激活后的 venv 里执行 `pip install -e .`。
 
 ## 命令行
 
@@ -171,7 +185,7 @@ gameping/
 ## 测试
 
 ```bash
-pip install pytest
+pip install pytest httpx2              # httpx2：新版 starlette 的 TestClient 需要它
 PYTHONPATH=src python -m pytest -q     # 111 passed
 ```
 

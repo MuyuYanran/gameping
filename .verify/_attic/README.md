@@ -12,3 +12,8 @@
   **已并入** `mobileInfo`（`overflowX`、`smallTouchTargets`、`inputFontSizes`）。
 
 保留仅为留档，不要直接运行。当前唯一的验收入口是 `../verify.js`。
+
+- `_browser-ping.js` — 验证「浏览器能否测延迟」的一次性实验：用 Image 计时与
+  `fetch(no-cors)` 计时对若干游戏域名取样，结论是浏览器只能测应用层 RTT
+  （含 TLS 与服务端处理），与后端 TCP 握手差异很大。留档作为「浏览器模式」
+  可行性判断的依据，勿直接运行。

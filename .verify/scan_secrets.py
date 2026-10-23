@@ -39,8 +39,12 @@ def scan_binary(path: str) -> list[str]:
 
 
 def main() -> int:
-    files = subprocess.run(["git", "diff", "--cached", "--name-only"],
-                           capture_output=True, text=True, check=True).stdout.split()
+    # -z + quotePath=false：否则非 ASCII 路径会被 git 转义成带引号的字符串，
+    # 直接拿去 open() 会 OSError [Errno 22]。
+    raw = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--cached",
+                          "--name-only", "-z"],
+                         capture_output=True, check=True).stdout
+    files = [p for p in raw.decode("utf-8", "surrogateescape").split("\0") if p]
     self_name = Path(__file__).name
     findings: list[str] = []
     checked = 0

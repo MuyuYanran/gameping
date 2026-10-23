@@ -13,6 +13,8 @@ data/*
 
 # Tooling
 .pytest_cache/
+# pytest 的临时根目录（中断或 --basetemp 时会留在仓库根）；注意 .gitignore 不支持行尾注释
+pytest-of-*/
 .coverage
 htmlcov/
 .idea/

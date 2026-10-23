@@ -15,7 +15,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# httpx2：新版 starlette 的 TestClient 依赖它；缺了会让 test_api*.py 在收集阶段报错
+dev = ["pytest>=8.0", "httpx2"]
 
 [project.scripts]
 gameping = "gameping.cli:main"

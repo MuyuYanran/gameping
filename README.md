@@ -30,14 +30,31 @@
 
 ## Quick start
 
+Use the project's own virtual environment. Do **not** rely on the bare `python` from
+`PATH` — another installed Python can shadow it (MySQL Workbench ships a stub
+`python.exe` with no `pip` and no packages, which also prints
+`Could not find platform independent libraries <prefix>`).
+
 ```bash
+python -m venv .venv                     # first time only
+.\.venv\Scripts\Activate.ps1             # PowerShell  (cmd: .venv\Scripts\activate.bat)
+
 pip install -r requirements.txt          # fastapi + uvicorn
 
-python -m gameping serve                # http://127.0.0.1:8848
-python -m gameping serve --port 9000    # custom port
+python run.py                            # http://127.0.0.1:8848
+python run.py serve --port 9000          # custom port
 ```
 
-From the project root you can also run `python run.py`.
+Activation is optional — naming the interpreter explicitly works from any shell, whatever
+order `PATH` happens to be in:
+
+```bash
+.\.venv\Scripts\python.exe run.py
+.\.venv\Scripts\python.exe run.py serve --port 9000
+```
+
+The `gameping` console script and `python -m gameping …` need the package installed:
+run `pip install -e .` inside the activated venv.
 
 ## Command line
 
@@ -174,7 +191,7 @@ steady 80 ms link — which is what actually ruins a match.
 ## Tests
 
 ```bash
-pip install pytest
+pip install pytest httpx2              # httpx2: required by starlette's TestClient
 PYTHONPATH=src python -m pytest -q     # 111 passed
 ```
 
